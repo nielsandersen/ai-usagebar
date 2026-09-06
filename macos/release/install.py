@@ -13,6 +13,7 @@ import tempfile
 LABEL = 'com.akitaonrails.ai-usagebar-menubar'
 DOMAIN = 'ai-usagebar-menubar'
 BINARIES = ('ai-usagebar', 'ai-usagebar-tui', 'ai-usagebar-menubar')
+PACKAGE_FILES = (*BINARIES, 'install.py', 'VERSION')
 
 def activate(root, target, start):
     if not start:
@@ -113,7 +114,7 @@ def main():
         for line in (source / 'SHA256SUMS').read_text().splitlines():
             digest, name = line.split(None, 1)
             checksums[name.lstrip('*')] = digest
-        for name in BINARIES:
+        for name in PACKAGE_FILES:
             if hashlib.sha256((source / name).read_bytes()).hexdigest() != checksums.get(name):
                 raise RuntimeError(f'Checksum mismatch: {name}')
         reported = subprocess.check_output([str(source / 'ai-usagebar'), '--version'], text=True).strip()
@@ -123,13 +124,13 @@ def main():
         versions.mkdir(exist_ok=True)
         target = versions / version
         if target.exists():
-            for name in BINARIES:
+            for name in PACKAGE_FILES:
                 if hashlib.sha256((target / name).read_bytes()).hexdigest() != checksums[name]:
                     raise RuntimeError('Installed version differs; publish a new version instead')
         else:
             stage = Path(tempfile.mkdtemp(prefix='.install-', dir=versions))
             try:
-                for name in (*BINARIES, 'install.py', 'VERSION', 'SHA256SUMS'):
+                for name in (*PACKAGE_FILES, 'SHA256SUMS'):
                     shutil.copy2(source / name, stage / name)
                 for name in BINARIES:
                     (stage / name).chmod(0o755)
