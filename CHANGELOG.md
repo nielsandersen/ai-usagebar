@@ -9,6 +9,20 @@ Each release is also published at
 
 ## [Unreleased]
 
+## [1.4.1-niels.5] — 2026-09-06
+
+### Added
+- One aggregate connection-health row in the expanded menu, with quiet all-clear state and on-demand issue/recovery details.
+- Typed per-connection health for login, setup, keychain lock, rate limits, connectivity, pending checks, and stale results.
+
+### Changed
+- Connection checks include all configured providers even in a single-provider view; the selected readout updates first.
+- Provider switching and manual refresh yield after the current request, without interrupting credential writes.
+
+### Fixed
+- Missing credentials cannot silently remove a previously monitored provider and produce a false all-clear.
+- Empty, unchecked, and outdated results never count as healthy; successful recovery removes old diagnostics.
+
 ## [1.4.1-niels.4] — 2026-09-06
 
 ### Changed
@@ -1632,7 +1646,7 @@ vendors. Highlights:
 - Live API smoke test suite (`make smoke`) that exercises the real
   undocumented endpoints to detect schema drift before users do.
 
-[Unreleased]: https://github.com/nielsandersen/ai-usagebar/compare/macos-v1.4.1-niels.4...codex/macos-personal
+[Unreleased]: https://github.com/nielsandersen/ai-usagebar/compare/macos-v1.4.1-niels.5...codex/macos-personal
 [1.4.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.2.0...v1.3.0
@@ -1685,3 +1699,5 @@ vendors. Highlights:
 [1.4.1-niels.3]: https://github.com/nielsandersen/ai-usagebar/releases/tag/macos-v1.4.1-niels.3
 
 [1.4.1-niels.4]: https://github.com/nielsandersen/ai-usagebar/releases/tag/macos-v1.4.1-niels.4
+
+[1.4.1-niels.5]: https://github.com/nielsandersen/ai-usagebar/releases/tag/macos-v1.4.1-niels.5

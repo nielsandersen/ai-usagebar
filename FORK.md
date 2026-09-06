@@ -14,6 +14,14 @@ Explicit account changes still work. Keychain writes go through `/usr/bin/securi
 
 The known upstream issue is https://github.com/akitaonrails/ai-usagebar/issues/148. This release prevents recurrence; it does not silently rewrite existing Keychain permissions.
 
+## Connection health
+
+The expanded menu shows one health summary across configured provider connections. Healthy connections collapse into “All services connected”; issues name one provider or show a compact count. The issue submenu contains the reason, last-check tooltip, Refresh Now, and Provider Settings. The healthy row has no diagnostic submenu.
+
+Health reflects the existing cache-first usage checks, not public outage pages or synthetic chat requests. Full quota usage is not a connectivity failure. Login rejection, missing setup, locked keychain, rate limits, missing output, and stale cached data remain distinct internally. A healthy check ages out after three refresh intervals (at least 90 seconds), including while a sweep is still running.
+
+All configured connections are checked serially, with the selected provider first. Selecting another provider or manually refreshing skips remaining requests after the current one finishes; it never interrupts a credential refresh. Previously monitored default provider IDs are remembered so lost credentials remain a visible issue after restart. Explicit disable/default-account visibility and named-account configuration control which connections remain monitored. The compact menu-bar face and existing usage metrics stay unchanged.
+
 ## Install or update
 
 Download the ARM64 release archive and its `.sha256` file from this fork’s Releases page. Verify with `shasum -a 256 -c ai-usagebar-macos-arm64.tar.gz.sha256`, unpack, then run `python3 ai-usagebar-macos-arm64/install.py`.

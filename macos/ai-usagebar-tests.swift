@@ -10,6 +10,7 @@
 // Gate: pure-logic regression coverage for the review fixes.
 
 import Foundation
+import Cocoa
 
 private var failures = 0
 
@@ -700,9 +701,81 @@ func testStatusAccessibility() {
                 "OpenRouter: $12.34", "balance providers keep currency in text alternative")
 }
 
+func testConnectionHealth() {
+    let onlyClaude = [MenuEntry(id: "anthropic", name: "Claude")]
+    assertEqual(retainMonitoredConnections(onlyClaude, previousIds: ["openai"], enabled: ["anthropic", "openai"]).map { $0.id },
+                ["anthropic", "openai"], "credential loss retains a previously monitored provider")
+    assertEqual(retainMonitoredConnections(onlyClaude, previousIds: ["openai"], enabled: ["anthropic"]).map { $0.id },
+                ["anthropic"], "explicitly disabled provider leaves monitoring")
+    let sweep = ConnectionSweep()
+    assertEqual(sweep.isCancelled, false, "new health sweep can proceed")
+    sweep.cancel()
+    assertEqual(sweep.isCancelled, true, "selection changes can stop remaining background checks")
+    let now = Date(timeIntervalSince1970: 1_000)
+    let good = ConnectionHealth(id: "anthropic", name: "Claude", state: .healthy, checkedAt: now)
+    let codex = ConnectionHealth(id: "openai", name: "Codex", state: .healthy, checkedAt: now)
+    assertEqual(connectionSummary([good, codex], now: now, maxAge: 90).title,
+                "All services connected", "healthy providers collapse into one row")
+    assertEqual(connectionSummary([], now: now, maxAge: 90).title,
+                "No services configured", "empty configuration is never an all-clear")
+    var failed = good
+    failed.state = .signInRequired
+    assertEqual(connectionSummary([failed, codex], now: now, maxAge: 90).title,
+                "Claude needs sign-in", "one failed connection names its provider")
+    var other = codex
+    other.state = .unavailable
+    assertEqual(connectionSummary([failed, other], now: now, maxAge: 90).title,
+                "2 connections need attention", "multiple failures stay compact")
+    assertEqual(connectionSummary([good], now: now.addingTimeInterval(91), maxAge: 90).healthy,
+                false, "old healthy result cannot remain an all-clear")
+    var pending = codex
+    pending.state = .checking
+    assertEqual(connectionSummary([good, pending], now: now, maxAge: 90).healthy,
+                false, "unchecked connection cannot become an all-clear")
+    assertEqual(connectionState(["text": "100%", "tooltip": "quota used"], vendor: "anthropic", hasSnapshot: true),
+                .healthy, "full usage quota is not a connection failure")
+    assertEqual(connectionState(["text": "42% ⏸", "tooltip": "HTTP 401 token expired"], vendor: "openai", hasSnapshot: true),
+                .signInRequired, "cached data does not hide expired login")
+    assertEqual(connectionState(["text": "42% ⏸", "tooltip": "HTTP 429 rate limit"], vendor: "anthropic", hasSnapshot: true),
+                .rateLimited, "rate limits are not mislabeled as provider outages")
+    assertEqual(connectionState(["text": "⚠", "tooltip": "missing OPENROUTER_API_KEY"], vendor: "openrouter", hasSnapshot: false),
+                .setupRequired, "missing API key requests setup")
+    assertEqual(connectionState(nil, vendor: "anthropic", hasSnapshot: false),
+                .unavailable, "missing process output is never healthy")
+}
+
+func testHealthMenuIntegration() {
+    _ = NSApplication.shared
+    let delegate = AppDelegate()
+    delegate.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    defer { NSStatusBar.system.removeStatusItem(delegate.statusItem) }
+    delegate.buildMenu()
+    delegate.monitoredConnections = [MenuEntry(id: "anthropic", name: "Claude"), MenuEntry(id: "openai", name: "Codex")]
+    let now = Date()
+    delegate.connectionHealth = [
+        "anthropic": ConnectionHealth(id: "anthropic", name: "Claude", state: .healthy, checkedAt: now),
+        "openai": ConnectionHealth(id: "openai", name: "Codex", state: .healthy, checkedAt: now),
+    ]
+    delegate.renderConnectionHealth()
+    assertEqual(delegate.healthItem.attributedTitle?.string, "All services connected", "real menu renders one quiet healthy row")
+    assertNil(delegate.healthItem.submenu, "healthy summary has no diagnostic clutter")
+    delegate.connectionHealth["anthropic"]?.state = .signInRequired
+    delegate.providerNotices["anthropic"] = "Sign in again in Claude Code."
+    delegate.renderConnectionHealth()
+    assertEqual(delegate.healthItem.attributedTitle?.string, "Claude needs sign-in", "real menu names failed provider")
+    assertEqual(delegate.healthItem.submenu?.items.contains(where: { $0.title == "Provider Settings…" }), true,
+                "issue submenu provides recovery action")
+    delegate.connectionHealth["anthropic"]?.state = .healthy
+    delegate.providerNotices.removeValue(forKey: "anthropic")
+    delegate.renderConnectionHealth()
+    assertNil(delegate.healthItem.submenu, "recovery removes the old failure details")
+}
+
 @main
 struct TestRunner {
     static func main() {
+        testHealthMenuIntegration()
+        testConnectionHealth()
         testStatusAccessibility()
         testProviderNotices()
         testRingArc()

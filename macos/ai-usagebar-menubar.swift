@@ -918,35 +918,125 @@ func stripMarkup(_ s: String) -> String {
         .replacingOccurrences(of: "&amp;", with: "&")
 }
 
-func providerNotice(_ output: [String: Any], vendor: String) -> String? {
+/// Cancellation yields between requests, never while an OAuth refresh may be writing.
+final class ConnectionSweep {
+    private let lock = NSLock()
+    private var stopped = false
+    func cancel() { lock.lock(); stopped = true; lock.unlock() }
+    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
+}
+
+/// Credential loss must not silently remove a previously monitored provider.
+/// Named accounts remain owned by the configured account enumeration.
+func retainMonitoredConnections(_ current: [MenuEntry], previousIds: Set<String>, enabled: Set<String>) -> [MenuEntry] {
+    var result = current
+    for vendor in VENDOR_AUTH where previousIds.contains(vendor.id) && enabled.contains(vendor.id) {
+        if !result.contains(where: { $0.id == vendor.id }) { result.append(MenuEntry(id: vendor.id, name: vendor.name)) }
+    }
+    return result
+}
+
+enum ConnectionState: Equatable {
+    case healthy, checking, signInRequired, setupRequired, keychainLocked, rateLimited, unavailable, stale
+}
+
+struct ConnectionHealth {
+    let id: String
+    let name: String
+    var state: ConnectionState
+    var checkedAt: Date
+}
+
+struct ConnectionSummary {
+    let title: String
+    let healthy: Bool
+}
+
+func connectionState(_ output: [String: Any]?, vendor: String, hasSnapshot: Bool) -> ConnectionState {
+    guard let output else { return .unavailable }
     let text = stripMarkup(output["text"] as? String ?? "")
     let detail = stripMarkup(output["tooltip"] as? String ?? "").lowercased()
     let stale = text.contains("⏸")
     let failed = text.contains("⚠")
-    guard stale || failed || text.contains("Loading") else { return nil }
+    guard stale || failed || text.contains("Loading") else { return hasSnapshot ? .healthy : .unavailable }
     if detail.contains("keychain") && (detail.contains("locked") || detail.contains("denied")) {
-        return "Unlock your login keychain, then retry."
+        return .keychainLocked
     }
-    if detail.contains("http 429") || detail.contains("rate limit") {
-        return stale ? "Provider is busy. Showing saved usage; retrying." : "Provider is busy. Retrying."
-    }
+    if detail.contains("http 429") || detail.contains("rate limit") { return .rateLimited }
+    if detail.contains("disabled") || detail.contains("not configured") { return .setupRequired }
     let auth = ["http 401", "http 403", "unauthorized", "not logged", "re-auth",
                 "sign in", "login", "credentials", "api_key", "api key", "token expired"]
         .contains { detail.contains($0) }
     if auth {
+        let loginProviders = ["anthropic", "openai", "cursor", "antigravity"]
+        return vendor.hasPrefix(DESKTOP_ACCOUNT_ID_PREFIX) || loginProviders.contains(baseVendorId(vendor))
+            ? .signInRequired : .setupRequired
+    }
+    if detail.contains("network") || detail.contains("connect") || detail.contains("timed out") { return .unavailable }
+    if text.contains("Loading") { return .checking }
+    return stale ? .stale : .unavailable
+}
+
+extension ConnectionHealth {
+    func effectiveState(now: Date, maxAge: TimeInterval) -> ConnectionState {
+        let age = now.timeIntervalSince(checkedAt)
+        return state == .healthy && (age < 0 || age > maxAge) ? .stale : state
+    }
+
+    func summary(now: Date, maxAge: TimeInterval) -> String {
+        switch effectiveState(now: now, maxAge: maxAge) {
+        case .healthy: return "\(name) is connected"
+        case .checking: return "Checking \(name)…"
+        case .signInRequired: return "\(name) needs sign-in"
+        case .setupRequired: return "\(name) needs setup"
+        case .keychainLocked: return "\(name) login is locked"
+        case .rateLimited: return "\(name) is rate limited"
+        case .unavailable: return "\(name) isn’t responding"
+        case .stale: return "\(name) check is out of date"
+        }
+    }
+}
+
+func connectionSummary(_ connections: [ConnectionHealth], now: Date, maxAge: TimeInterval) -> ConnectionSummary {
+    guard !connections.isEmpty else { return ConnectionSummary(title: "No services configured", healthy: false) }
+    let issues = connections.filter {
+        let state = $0.effectiveState(now: now, maxAge: maxAge)
+        return state != .healthy && state != .checking
+    }
+    if let issue = issues.first, issues.count == 1 {
+        return ConnectionSummary(title: issue.summary(now: now, maxAge: maxAge), healthy: false)
+    }
+    if issues.count > 1 {
+        return ConnectionSummary(title: "\(issues.count) connections need attention", healthy: false)
+    }
+    if connections.contains(where: { $0.state == .checking }) {
+        return ConnectionSummary(title: "Checking connections…", healthy: false)
+    }
+    return ConnectionSummary(title: "All services connected", healthy: true)
+}
+
+func providerNotice(_ output: [String: Any], vendor: String) -> String? {
+    let text = stripMarkup(output["text"] as? String ?? "")
+    guard text.contains("⏸") || text.contains("⚠") || text.contains("Loading") else { return nil }
+    switch connectionState(output, vendor: vendor, hasSnapshot: true) {
+    case .healthy: return nil
+    case .keychainLocked: return "Unlock your login keychain, then retry."
+    case .rateLimited:
+        return text.contains("⏸") ? "Provider is busy. Showing saved usage; retrying." : "Provider is busy. Retrying."
+    case .signInRequired:
         if vendor.hasPrefix(DESKTOP_ACCOUNT_ID_PREFIX) { return "Sign in again in Claude Desktop." }
         switch baseVendorId(vendor) {
         case "anthropic": return "Sign in again in Claude Code."
         case "openai": return "Sign in again in Codex."
         case "cursor": return "Sign in again in Cursor."
-        case "antigravity": return "Open Antigravity and check your sign-in."
-        default: return "Check your API key in Settings."
+        default: return "Open Antigravity and check your sign-in."
         }
+    case .setupRequired:
+        return VENDOR_AUTH.first(where: { $0.id == baseVendorId(vendor) })?.kind == "apikey"
+            ? "Check your API key in Settings." : "Check your provider setup in Settings."
+    case .checking, .unavailable: return "Can't connect. Check your connection; retrying."
+    case .stale: return "Showing saved usage. Retrying."
     }
-    if text.contains("Loading") || detail.contains("network") || detail.contains("connect") || detail.contains("timed out") {
-        return "Can't connect. Check your connection; retrying."
-    }
-    return stale ? "Showing saved usage. Retrying." : "Couldn't load usage. Check provider setup in Settings."
 }
 
 func parse(_ text: String, vendor: String) -> Snapshot? {
@@ -2319,9 +2409,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// At most one subprocess in flight; a request arriving while one runs is
     /// coalesced rather than stacked.
     var refreshInFlight = false
+    var inFlightVendor: String?
+    var connectionSweep: ConnectionSweep?
     var refreshQueued = false
     let headerItem = NSMenuItem()
     let connectionNoticeItem = NSMenuItem()
+    let healthItem = NSMenuItem()
+    var monitoredConnections: [MenuEntry]?
+    var connectionHealth: [String: ConnectionHealth] = [:]
     var providerNotices: [String: String] = [:]
     var rows: [String: NSMenuItem] = [:]
     // Overview mode fills these (one per vendor/account); hidden in
@@ -2650,6 +2745,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.autoenablesItems = false
 
         menu.addItem(headerItem)
+        healthItem.isEnabled = false
+        healthItem.title = "Checking connections…"
+        menu.addItem(healthItem)
         connectionNoticeItem.isEnabled = false
         connectionNoticeItem.isHidden = true
         menu.addItem(connectionNoticeItem)
@@ -2708,6 +2806,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func menuWillOpen(_ menu: NSMenu) {
+        renderConnectionHealth()
         if Date().timeIntervalSince(accountStatusFetchedAt) >= 5 { fetchAccountStatus() }
     }
 
@@ -2717,7 +2816,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(it)
     }
 
-    @objc func refreshAction() { refresh() }
+    @objc func refreshAction() { connectionSweep?.cancel(); refresh() }
     @objc func quit() { NSApp.terminate(nil) }
 
     /// Flip the overview's compact mode; the UserDefaults observer re-renders,
@@ -2787,6 +2886,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let vendorChanged = VENDOR != lastVendor
         lastVendor = VENDOR
         if vendorChanged {
+            connectionSweep?.cancel()
             showLoading()
         } else if VENDOR == "overview" {
             if let ov = lastOverview { renderOverview(ov) }
@@ -2850,7 +2950,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func refresh() {
+        renderConnectionHealth()
         guard let bin = resolveBinary("ai-usagebar") else {
+            for id in Array(connectionHealth.keys) { connectionHealth[id]?.state = .unavailable }
+            renderConnectionHealth()
+            if connectionHealth.isEmpty {
+                healthItem.title = "Connection checks unavailable"
+                healthItem.attributedTitle = run(healthItem.title, .labelColor, menuLabelFont)
+            }
             setError("ai-usagebar not found (PATH / ~/.cargo/bin / homebrew)")
             return
         }
@@ -2858,62 +2965,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // asked for so a vendor change during a fetch is not simply dropped.
         if refreshInFlight {
             refreshQueued = true
+            if inFlightVendor != VENDOR { connectionSweep?.cancel() }
             return
         }
         refreshInFlight = true
+        inFlightVendor = VENDOR
+        let sweep = ConnectionSweep()
+        connectionSweep = sweep
         refreshGeneration += 1
         let generation = refreshGeneration
         // Captured for THIS attempt: reading `VENDOR` again on completion would
         // label a late result with whatever is selected by then.
         let vendor = VENDOR
 
-        if vendor == "overview" {
-            refreshOverview(bin: bin, generation: generation)
-            return
-        }
-
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: bin)
-            p.arguments = vendorArgs(for: vendor) + ["--format", FORMAT_WITH_SENTINEL]
-            let pipe = Pipe()
-            p.standardOutput = pipe
-            p.standardError = FileHandle.nullDevice
-
-            // The subprocess takes the cache lock and may refresh OAuth over
-            // the network; without a bound it can hold this worker for a very
-            // long time. Kill it and report instead of hanging silently.
-            let watchdog = DispatchWorkItem { if p.isRunning { p.terminate() } }
-            DispatchQueue.global(qos: .utility)
-                .asyncAfter(deadline: .now() + REFRESH_TIMEOUT, execute: watchdog)
-
-            var out = ""
-            do {
-                try p.run()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()  // read before wait
-                p.waitUntilExit()
-                out = String(data: data, encoding: .utf8) ?? ""
-            } catch {
-                watchdog.cancel()
-                DispatchQueue.main.async {
-                    self?.finishRefresh(generation) { $0.setError("failed to run ai-usagebar") }
-                }
-                return
-            }
-            watchdog.cancel()
-            let timedOut = out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            DispatchQueue.main.async {
-                self?.finishRefresh(generation) { me in
-                    // Selection may have changed while this ran.
-                    guard vendor == VENDOR else { return }
-                    if timedOut {
-                        me.setError("ai-usagebar took too long (>\(Int(REFRESH_TIMEOUT))s)")
-                    } else {
-                        me.consume(out)
-                    }
-                }
-            }
-        }
+        refreshProviders(bin: bin, generation: generation, selectedVendor: vendor, cancellation: sweep)
     }
 
     /// Applies `body` only when `generation` is still the current attempt, then
@@ -2922,6 +2987,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let current = generation == refreshGeneration
         if current {
             refreshInFlight = false
+            inFlightVendor = nil
+            connectionSweep = nil
             body(self)
         }
         if current && refreshQueued {
@@ -2930,24 +2997,46 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// Overview mode: fetch every configured vendor and render one compact row
-    /// each. Sequential on purpose — reads are cache-first, and serializing
-    /// respects the per-vendor cache flock and avoids an OAuth-refresh 429 burst.
-    /// ponytail: parallelize only if it ever feels slow.
-    func refreshOverview(bin: String, generation: Int) {
-        // vendorEntries(active: "") keeps only configured entries — the
-        // active-vendor courtesy slot has no place in an all-vendors sweep.
-        let entries = filterOverviewEntries(vendorEntries(
-                                                active: "",
-                                                usageAccounts: lastAccountStatus?.usageAccounts),
-                                            requested: configuredOverviewVendorIds())
+    /// One serial sweep feeds both the usage readout and aggregate health.
+    /// The selected provider is fetched first and painted immediately; a slow
+    /// secondary connection must not hold the selected readout hostage.
+    func refreshProviders(bin: String, generation: Int, selectedVendor: String, cancellation: ConnectionSweep) {
+        let configured = vendorEntries(active: selectedVendor, usageAccounts: lastAccountStatus?.usageAccounts)
+        let previous = Set(DEF.stringArray(forKey: "monitoredProviderIds") ?? [])
+        let enabled = Set(VENDOR_AUTH.filter { vendor in
+            guard vendorEnabled(vendor) else { return false }
+            if vendor.id == "anthropic" {
+                let hasAccounts = lastAccountStatus?.usageAccounts.map { !$0.isEmpty } ?? !claudeAccountLabels().isEmpty
+                return showDefaultAccount(configValue: configValueTOML(vendor.id, "show_default_account"), hasAccounts: hasAccounts)
+            }
+            if vendor.id == "openrouter" {
+                return showDefaultAccount(configValue: configValueTOML(vendor.id, "show_default_account"), hasAccounts: !openRouterAccountLabels().isEmpty)
+            }
+            return true
+        }.map { $0.id })
+        var entries = retainMonitoredConnections(configured, previousIds: previous, enabled: enabled)
+        if selectedVendor != "overview", !entries.contains(where: { $0.id == selectedVendor }) {
+            entries.append(MenuEntry(id: selectedVendor, name: entryDisplayName(selectedVendor)))
+        }
+        monitoredConnections = entries
+        let knownProviders = Set(entries.filter { $0.id == baseVendorId($0.id) }.map { $0.id }).intersection(enabled).sorted()
+        if knownProviders != DEF.stringArray(forKey: "monitoredProviderIds") {
+            DEF.set(knownProviders, forKey: "monitoredProviderIds")
+        }
+        let ids = Set(entries.map { $0.id })
+        connectionHealth = connectionHealth.filter { ids.contains($0.key) }
+        providerNotices = providerNotices.filter { ids.contains($0.key) }
+        renderConnectionHealth()
+        let sweep = entries.filter { $0.id == selectedVendor } + entries.filter { $0.id != selectedVendor }
+        let requestedOverview = configuredOverviewVendorIds()
+        let displayEntries = filterOverviewEntries(entries, requested: requestedOverview)
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            var results: [(name: String, id: String, snap: Snapshot?)] = []
-            var notices: [String: String] = [:]
-            for v in entries {
+            var snapshots: [String: Snapshot] = [:]
+            for entry in sweep {
+                if cancellation.isCancelled { break }
                 let p = Process()
                 p.executableURL = URL(fileURLWithPath: bin)
-                p.arguments = vendorArgs(for: v.id) + ["--format", FORMAT_WITH_SENTINEL]
+                p.arguments = vendorArgs(for: entry.id) + ["--format", FORMAT_WITH_SENTINEL]
                 let pipe = Pipe()
                 p.standardOutput = pipe
                 p.standardError = FileHandle.nullDevice
@@ -2962,25 +3051,90 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     out = String(data: data, encoding: .utf8) ?? ""
                 } catch { out = "" }
                 watchdog.cancel()
-                var snap: Snapshot?
-                if let data = out.data(using: .utf8),
-                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let text = obj["text"] as? String {
-                    snap = parse(text, vendor: baseVendorId(v.id))
-                    notices[v.id] = providerNotice(obj, vendor: v.id)
-                } else {
-                    notices[v.id] = "Couldn't load usage. Try Refresh Now."
+                let object = out.data(using: .utf8).flatMap {
+                    (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any]
                 }
-                results.append((name: v.name, id: v.id, snap: snap))
+                let snap = (object?["text"] as? String).flatMap { parse($0, vendor: baseVendorId(entry.id)) }
+                if let snap { snapshots[entry.id] = snap }
+                let state = connectionState(object, vendor: entry.id, hasSnapshot: snap != nil)
+                let health = ConnectionHealth(id: entry.id, name: entry.name, state: state, checkedAt: Date())
+                let notice = object.flatMap { providerNotice($0, vendor: entry.id) }
+                    ?? (snap == nil ? "Couldn't load usage. Try Refresh Now." : nil)
+                DispatchQueue.main.async {
+                    guard let me = self, me.refreshGeneration == generation else { return }
+                    me.connectionHealth[entry.id] = health
+                    me.providerNotices[entry.id] = notice
+                    me.renderConnectionHealth()
+                    if entry.id == selectedVendor, selectedVendor == VENDOR {
+                        if let snap {
+                            me.lastSnapshot = snap
+                            me.renderPanel(snap)
+                            me.renderMenu(snap)
+                        } else {
+                            me.setError(notice ?? "Couldn't load usage. Try Refresh Now.")
+                        }
+                    }
+                }
             }
+            let results = displayEntries.map { (name: $0.name, id: $0.id, snap: snapshots[$0.id]) }
             DispatchQueue.main.async {
                 self?.finishRefresh(generation) { me in
-                    guard VENDOR == "overview" else { return }
-                    me.providerNotices = notices
-                    me.renderOverview(results)
+                    if !cancellation.isCancelled, selectedVendor == "overview", VENDOR == "overview" { me.renderOverview(results) }
+                    me.renderConnectionHealth()
                 }
             }
         }
+    }
+
+    func renderConnectionHealth() {
+        guard let entries = monitoredConnections else { return }
+        let now = Date()
+        let maxAge = max(90, INTERVAL * 3)
+        let connections = entries.map { entry in
+            connectionHealth[entry.id] ?? ConnectionHealth(id: entry.id, name: entry.name, state: .checking, checkedAt: .distantPast)
+        }
+        let summary = connectionSummary(connections, now: now, maxAge: maxAge)
+        healthItem.attributedTitle = run(summary.title, summary.healthy ? .secondaryLabelColor : .labelColor, menuLabelFont)
+        healthItem.setAccessibilityLabel(summary.title)
+        let pendingOnly = !connections.isEmpty && connections.allSatisfy {
+            let state = $0.effectiveState(now: now, maxAge: maxAge)
+            return state == .healthy || state == .checking
+        }
+        let symbol = summary.healthy ? "checkmark.circle" : (pendingOnly ? "clock" : "exclamationmark.circle")
+        healthItem.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        healthItem.image?.size = NSSize(width: 14, height: 14)
+        healthItem.toolTip = "Recent usage checks for configured provider connections. This is not a public outage report."
+        let issues = connections.filter { $0.effectiveState(now: now, maxAge: maxAge) != .healthy }
+        healthItem.isEnabled = !issues.isEmpty
+        guard !issues.isEmpty else { healthItem.submenu = nil; return }
+        let details = NSMenu()
+        details.autoenablesItems = false
+        let relative = RelativeDateTimeFormatter()
+        relative.unitsStyle = .full
+        for (index, health) in issues.enumerated() {
+            if index > 0 { details.addItem(.separator()) }
+            let row = NSMenuItem(title: health.summary(now: now, maxAge: maxAge), action: nil, keyEquivalent: "")
+            row.isEnabled = false
+            row.attributedTitle = run(row.title, .labelColor, menuLabelFont)
+            details.addItem(row)
+            let reason = providerNotices[health.id] ?? "Use Refresh Now to check the connection."
+            let help = NSMenuItem(title: reason, action: nil, keyEquivalent: "")
+            help.isEnabled = false
+            help.attributedTitle = run(reason, .secondaryLabelColor, menuLabelFont)
+            if health.checkedAt != .distantPast {
+                help.toolTip = "Last checked " + relative.localizedString(for: health.checkedAt, relativeTo: now)
+            }
+            details.addItem(help)
+        }
+        details.addItem(.separator())
+        addAction(details, "Refresh Now", #selector(refreshAction), "")
+        addAction(details, "Provider Settings…", #selector(openConnectionSettings), "")
+        healthItem.submenu = details
+    }
+
+    @objc func openConnectionSettings() {
+        openPrefs()
+        (prefsWindow?.contentViewController as? SettingsPaneController)?.selectedTabViewItemIndex = 2
     }
 
     /// The single most-relevant number for a vendor in the overview.
@@ -3172,11 +3326,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }.joined(separator: "\n")
         let details = items.map { item -> [OverviewDetail] in
             guard !hidden.contains(item.id) else { return [] }
-            var result = item.snap == nil && providerNotices[item.id] != nil ? [] : overviewDetails(item.snap)
-            if let message = providerNotices[item.id] {
-                result.insert(OverviewDetail(label: message, pct: nil, dim: true, notice: true), at: 0)
-            }
-            return result
+            return item.snap == nil && providerNotices[item.id] != nil ? [] : overviewDetails(item.snap)
         }
         ensureOverviewRowCapacity(items.count + details.reduce(0) { $0 + $1.count })
         // One label column for every provider's rows at once — measuring per
@@ -3333,7 +3483,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func renderMenu(_ s: Snapshot) {
         let message = providerNotices[VENDOR]
-        connectionNoticeItem.isHidden = message == nil
+        connectionNoticeItem.isHidden = true
         connectionNoticeItem.attributedTitle = run(message ?? "", .secondaryLabelColor, menuLabelFont)
         statusItem.button?.toolTip = message
         let appearance = statusItem.button?.effectiveAppearance ?? NSApp.effectiveAppearance
