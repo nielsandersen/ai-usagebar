@@ -46,4 +46,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" dist/* --verify-tag --title "AI Usage Bar $TAG" --notes 'Personal macOS edition. See FORK.md for installation, rollback, and authentication behavior.'
+        run: |
+          if gh release view "$TAG" --json isDraft --jq .isDraft > /tmp/release-draft; then
+            if test "$(cat /tmp/release-draft)" = true; then
+              gh release upload "$TAG" dist/* --clobber
+              gh release edit "$TAG" --draft=false
+            else
+              echo 'Release already published; preserving its verified immutable assets.'
+            fi
+          else
+            gh release create "$TAG" dist/* --verify-tag --title "AI Usage Bar $TAG" --notes 'Personal macOS edition. See FORK.md for installation, rollback, and authentication behavior.'
+          fi

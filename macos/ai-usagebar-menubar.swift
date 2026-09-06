@@ -908,6 +908,37 @@ func stripMarkup(_ s: String) -> String {
         .replacingOccurrences(of: "&amp;", with: "&")
 }
 
+func providerNotice(_ output: [String: Any], vendor: String) -> String? {
+    let text = stripMarkup(output["text"] as? String ?? "")
+    let detail = stripMarkup(output["tooltip"] as? String ?? "").lowercased()
+    let stale = text.contains("⏸")
+    let failed = text.contains("⚠")
+    guard stale || failed || text.contains("Loading") else { return nil }
+    if detail.contains("keychain") && (detail.contains("locked") || detail.contains("denied")) {
+        return "Unlock your login keychain, then retry."
+    }
+    if detail.contains("http 429") || detail.contains("rate limit") {
+        return stale ? "Provider is busy. Showing saved usage; retrying." : "Provider is busy. Retrying."
+    }
+    let auth = ["http 401", "http 403", "unauthorized", "not logged", "re-auth",
+                "sign in", "login", "credentials", "api_key", "api key", "token expired"]
+        .contains { detail.contains($0) }
+    if auth {
+        if vendor.hasPrefix(DESKTOP_ACCOUNT_ID_PREFIX) { return "Sign in again in Claude Desktop." }
+        switch baseVendorId(vendor) {
+        case "anthropic": return "Sign in again in Claude Code."
+        case "openai": return "Sign in again in Codex."
+        case "cursor": return "Sign in again in Cursor."
+        case "antigravity": return "Open Antigravity and check your sign-in."
+        default: return "Check your API key in Preferences."
+        }
+    }
+    if text.contains("Loading") || detail.contains("network") || detail.contains("connect") || detail.contains("timed out") {
+        return "Can't connect. Check your connection; retrying."
+    }
+    return stale ? "Showing saved usage. Retrying." : "Couldn't load usage. Check provider setup in Preferences."
+}
+
 func parse(_ text: String, vendor: String) -> Snapshot? {
     let f = stripMarkup(text).components(separatedBy: ";;")
     guard f.count >= 10 else { return nil }
@@ -2149,6 +2180,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var refreshInFlight = false
     var refreshQueued = false
     let headerItem = NSMenuItem()
+    let connectionNoticeItem = NSMenuItem()
+    var providerNotices: [String: String] = [:]
     var rows: [String: NSMenuItem] = [:]
     // Overview mode fills these (one per vendor/account); hidden in
     // single-vendor mode. The pool starts at the built-in vendor count and can
@@ -2463,6 +2496,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.autoenablesItems = false
 
         menu.addItem(headerItem)
+        connectionNoticeItem.isEnabled = false
+        connectionNoticeItem.isHidden = true
+        menu.addItem(connectionNoticeItem)
         // Reads as a sub-line of the header, so it sits above the usage rows.
         accountsInfoItem.isEnabled = false
         accountsInfoItem.isHidden = true
@@ -2749,6 +2785,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                             requested: configuredOverviewVendorIds())
         DispatchQueue.global(qos: .utility).async { [weak self] in
             var results: [(name: String, id: String, snap: Snapshot?)] = []
+            var notices: [String: String] = [:]
             for v in entries {
                 let p = Process()
                 p.executableURL = URL(fileURLWithPath: bin)
@@ -2772,12 +2809,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                    let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let text = obj["text"] as? String {
                     snap = parse(text, vendor: baseVendorId(v.id))
+                    notices[v.id] = providerNotice(obj, vendor: v.id)
+                } else {
+                    notices[v.id] = "Couldn't load usage. Try Refresh Now."
                 }
                 results.append((name: v.name, id: v.id, snap: snap))
             }
             DispatchQueue.main.async {
                 self?.finishRefresh(generation) { me in
                     guard VENDOR == "overview" else { return }
+                    me.providerNotices = notices
                     me.renderOverview(results)
                 }
             }
@@ -2893,6 +2934,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var reset: String? = nil
         var elapsed: Int? = nil
         var dim: Bool = false
+        var notice: Bool = false
     }
 
     /// Every window a provider actually reports, in the single-vendor menu's
@@ -2966,7 +3008,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // items, so "sections" is only a matter of how many slots each provider
         // claims — headers 1, plus one per detail row while it is shown.
         let hidden = overviewHiddenProviders()
-        let details = items.map { hidden.contains($0.id) ? [] : overviewDetails($0.snap) }
+        connectionNoticeItem.isHidden = true
+        statusItem.button?.toolTip = items.compactMap { item in
+            providerNotices[item.id].map { "\(item.name): \($0)" }
+        }.joined(separator: "\n")
+        let details = items.map { item -> [OverviewDetail] in
+            guard !hidden.contains(item.id) else { return [] }
+            var result = item.snap == nil && providerNotices[item.id] != nil ? [] : overviewDetails(item.snap)
+            if let message = providerNotices[item.id] {
+                result.insert(OverviewDetail(label: message, pct: nil, dim: true, notice: true), at: 0)
+            }
+            return result
+        }
         ensureOverviewRowCapacity(items.count + details.reduce(0) { $0 + $1.count })
         // One label column for every provider's rows at once — measuring per
         // section would give each provider its own grid and the menu would read
@@ -3004,7 +3057,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 it.target = nil
                 it.action = nil
                 it.representedObject = nil
-                it.attributedTitle = overviewDetailTitle(d, colW, appearance)
+                it.attributedTitle = d.notice ? run(d.label, .secondaryLabelColor, menuLabelFont)
+                    : overviewDetailTitle(d, colW, appearance)
             }
         }
         for i in slot..<overviewRows.count { overviewRows[i].isHidden = true }
@@ -3042,12 +3096,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             setError("invalid output")
             return
         }
+        providerNotices[VENDOR] = providerNotice(obj, vendor: VENDOR)
         guard let snap = parse(text, vendor: baseVendorId(VENDOR)) else {
-            lastSnapshot = nil
-            let appearance = statusItem.button?.effectiveAppearance ?? NSApp.effectiveAppearance
-            let raw = stripMarkup(text)  // Loading… / ⚠
-            setStatusFace([StatusEntry(pct: nil, text: String(raw.prefix(12)))],
-                          textTitle: run(raw, menuBarTextColor(appearance), statusFont))
+            setError(providerNotices[VENDOR] ?? "Couldn't load usage. Check provider setup in Preferences.")
             return
         }
         lastSnapshot = snap
@@ -3114,6 +3165,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func renderMenu(_ s: Snapshot) {
+        let message = providerNotices[VENDOR]
+        connectionNoticeItem.isHidden = message == nil
+        connectionNoticeItem.attributedTitle = run(message ?? "", .secondaryLabelColor, menuLabelFont)
+        statusItem.button?.toolTip = message
         let appearance = statusItem.button?.effectiveAppearance ?? NSApp.effectiveAppearance
         for it in overviewRows { it.isHidden = true }
         compactItem.isHidden = true
@@ -3460,6 +3515,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func setError(_ msg: String) {
+        connectionNoticeItem.isHidden = true
+        statusItem.button?.toolTip = msg
         lastSnapshot = nil
         // One error face in every mode: the system's own warning symbol (a
         // template, so it tints itself) and no text. The message is one click

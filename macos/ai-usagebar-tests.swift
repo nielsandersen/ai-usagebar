@@ -677,9 +677,25 @@ func testDesktopAccounts() {
                 "OpenRouter accounts use generic report ids")
 }
 
+func testProviderNotices() {
+    assertEqual(providerNotice(["text": "⚠", "tooltip": "HTTP 401 unauthorized"], vendor: "anthropic"),
+                "Sign in again in Claude Code.", "Claude auth failure gives login nudge")
+    assertEqual(providerNotice(["text": "42% ⏸", "tooltip": "HTTP 401 token expired"], vendor: "openai"),
+                "Sign in again in Codex.", "cached Codex data still shows login nudge")
+    assertEqual(providerNotice(["text": "⚠", "tooltip": "missing OPENROUTER_API_KEY"], vendor: "openrouter"),
+                "Check your API key in Preferences.", "API providers give key setup nudge")
+    assertEqual(providerNotice(["text": "Loading…", "tooltip": "waiting for network"], vendor: "anthropic"),
+                "Can't connect. Check your connection; retrying.", "offline does not falsely demand new login")
+    assertEqual(providerNotice(["text": "42% ⏸", "tooltip": "HTTP 429 rate limited"], vendor: "openrouter"),
+                "Provider is busy. Showing saved usage; retrying.", "rate limit does not demand new login")
+    assertEqual(providerNotice(["text": "42%", "tooltip": "healthy"], vendor: "openai"),
+                nil, "healthy provider clears notice")
+}
+
 @main
 struct TestRunner {
     static func main() {
+        testProviderNotices()
         testRingArc()
         testTomlParsing()
         testDefaultEnabled()

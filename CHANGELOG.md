@@ -9,6 +9,11 @@ Each release is also published at
 
 ## [Unreleased]
 
+## [1.4.1-niels.2] — 2026-09-06
+
+### Added
+- Provider-specific login, API key, connection, and retry messages in the menu and overview, including when displaying cached usage.
+
 ## [1.4.1-niels.1] — 2026-09-06
 
 ### Added
@@ -1610,7 +1615,7 @@ vendors. Highlights:
 - Live API smoke test suite (`make smoke`) that exercises the real
   undocumented endpoints to detect schema drift before users do.
 
-[Unreleased]: https://github.com/nielsandersen/ai-usagebar/compare/macos-v1.4.1-niels.1...codex/macos-personal
+[Unreleased]: https://github.com/nielsandersen/ai-usagebar/compare/macos-v1.4.1-niels.2...codex/macos-personal
 [1.4.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.2.0...v1.3.0
@@ -1657,3 +1662,5 @@ vendors. Highlights:
 [0.1.0]: https://github.com/akitaonrails/ai-usagebar/releases/tag/v0.1.0
 
 [1.4.1-niels.1]: https://github.com/nielsandersen/ai-usagebar/releases/tag/macos-v1.4.1-niels.1
+
+[1.4.1-niels.2]: https://github.com/nielsandersen/ai-usagebar/releases/tag/macos-v1.4.1-niels.2
