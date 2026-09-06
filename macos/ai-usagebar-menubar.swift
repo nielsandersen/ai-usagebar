@@ -2450,6 +2450,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var accountSwitchInFlight = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let resources = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+            .resolvingSymlinksInPath().deletingLastPathComponent()
+        if let icon = NSImage(contentsOf: resources.appendingPathComponent("AppIcon.icns")) {
+            NSApp.applicationIconImage = icon
+        }
         DEF.register(defaults: ["swapShortcutEnabled": true, "compactShortcutEnabled": true])
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         // Every face is image-then-text (see setStatusFace); set the position
@@ -2732,6 +2737,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let appMenu = NSMenu(title: "AI Usage Bar")
         let appItem = NSMenuItem(); appItem.submenu = appMenu
         applicationMenu.addItem(appItem)
+        addAction(appMenu, "About AI Usage Bar", #selector(openAbout), "")
+        appMenu.addItem(.separator())
         addAction(appMenu, "Settings…", #selector(openPrefs), ",")
         appMenu.addItem(.separator())
         addAction(appMenu, "Quit AI Usage Bar", #selector(quit), "q")
@@ -2792,6 +2799,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.isHidden = true
             moreMenu.addItem(item)
         }
+        moreMenu.addItem(.separator())
+        addAction(moreMenu, "About AI Usage Bar", #selector(openAbout), "")
         let moreItem = NSMenuItem(title: "Actions", action: nil, keyEquivalent: "")
         moreItem.submenu = moreMenu
         menu.addItem(moreItem)
@@ -2823,6 +2832,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// which also relabels the item (Compact ↔ Expand).
     @objc func toggleCompact() {
         DEF.set(!DEF.bool(forKey: "overviewCompact"), forKey: "overviewCompact")
+    }
+
+    @objc func openAbout() {
+        let resources = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+            .resolvingSymlinksInPath().deletingLastPathComponent()
+        let version = (try? String(contentsOf: resources.appendingPathComponent("VERSION"), encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "Personal edition"
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationName: "AI Usage Bar",
+            .applicationVersion: version,
+            .version: "",
+            .applicationIcon: NSApp.applicationIconImage as Any,
+            .credits: NSAttributedString(string: "Your AI usage, quietly in view.")
+        ])
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc func openPrefs() {

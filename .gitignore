@@ -34,3 +34,6 @@ macos/printscreen/
 /dist/
 macos/*.bak
 __pycache__/
+
+# Icon copied next to the local development executable
+macos/AppIcon.icns

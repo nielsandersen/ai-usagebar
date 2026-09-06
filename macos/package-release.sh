@@ -10,8 +10,8 @@ cargo build --release --locked --bins
 OUT="$ROOT/dist/ai-usagebar-macos-$ARCH"
 mkdir -p "$OUT"
 cp target/release/ai-usagebar target/release/ai-usagebar-tui macos/ai-usagebar-menubar "$OUT/"
-cp macos/release/install.py "$OUT/"
+cp macos/release/install.py macos/assets/AppIcon.icns "$OUT/"
 printf '%s\n' "$VERSION" > "$OUT/VERSION"
-(cd "$OUT" && shasum -a 256 ai-usagebar ai-usagebar-tui ai-usagebar-menubar install.py VERSION > SHA256SUMS)
+(cd "$OUT" && shasum -a 256 ai-usagebar ai-usagebar-tui ai-usagebar-menubar AppIcon.icns install.py VERSION > SHA256SUMS)
 (cd "$ROOT/dist" && tar -czf "ai-usagebar-macos-$ARCH.tar.gz" "ai-usagebar-macos-$ARCH" && shasum -a 256 "ai-usagebar-macos-$ARCH.tar.gz" > "ai-usagebar-macos-$ARCH.tar.gz.sha256")
 echo "Package: $OUT"

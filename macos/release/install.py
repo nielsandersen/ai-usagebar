@@ -13,7 +13,7 @@ import tempfile
 LABEL = 'com.akitaonrails.ai-usagebar-menubar'
 DOMAIN = 'ai-usagebar-menubar'
 BINARIES = ('ai-usagebar', 'ai-usagebar-tui', 'ai-usagebar-menubar')
-PACKAGE_FILES = (*BINARIES, 'install.py', 'VERSION')
+PACKAGE_FILES = (*BINARIES, 'AppIcon.icns', 'install.py', 'VERSION')
 
 def activate(root, target, start):
     if not start:
