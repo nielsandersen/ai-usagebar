@@ -33,6 +33,8 @@ let SETTINGS_DEFAULTS: [String: Any] = [
     "showBars": true,
     "showMeta": true,
     "barStyle": "block",
+    "menuBarMode": "compact",
+    "menuBarGlyph": "dot",
     "colorLow": "#98c379",
     "colorMid": "#e5c07b",
     "colorHigh": "#d19a66",
@@ -58,6 +60,19 @@ var SHOW_BARS: Bool { DEF.bool(forKey: "showBars") }
 // Layout of the progress indicator: "block" (default, text bars ░█) or "ring"
 // (a Core Graphics arc image). Both honor the meta marker the same way.
 var BAR_STYLE: String { DEF.string(forKey: "barStyle") ?? "block" }
+/// Menu-bar face: "icon" (template ring only), "compact" (ring + worst %),
+/// "text" (full readout). Unknown values fall back to compact.
+func menuBarMode(_ raw: String?) -> String {
+    ["icon", "compact", "text"].contains(raw ?? "") ? raw! : "compact"
+}
+var MENUBAR_MODE: String { menuBarMode(DEF.string(forKey: "menuBarMode")) }
+/// Which glyph stands for a provider: "dot" (the default anonymous severity
+/// dot) or "mark" (its own silhouette). Unknown values fall back to the dot —
+/// the face that works for every provider, mark or no mark.
+func menuBarGlyph(_ raw: String?) -> String {
+    ["dot", "mark"].contains(raw ?? "") ? raw! : "dot"
+}
+var MENUBAR_GLYPH: String { menuBarGlyph(DEF.string(forKey: "menuBarGlyph")) }
 var COLOR_LOW: String { DEF.string(forKey: "colorLow") ?? "#98c379" }
 var COLOR_MID: String { DEF.string(forKey: "colorMid") ?? "#e5c07b" }
 var COLOR_HIGH: String { DEF.string(forKey: "colorHigh") ?? "#d19a66" }
@@ -125,14 +140,15 @@ func menuBarTextColor(_ appearance: NSAppearance, secondary: Bool = false) -> NS
 }
 
 // The ring track needs to stay visible over both light and dark menu bars /
-// dropdowns. The user-configured COLOR_EMPTY is a dark charcoal meant for the
-// block bar's ░ glyphs on a light surface; on a dark wallpaper or dark menu bar
-// it vanishes. So the ring track uses a faint white in dark appearance (visible
-// against the dark background) and falls back to COLOR_EMPTY in light
-// appearance, keeping parity with the block bar there.
+// dropdowns, but it is scenery, not data: it says where the arc could go, so it
+// must never compete with the arc that says where it is. A neutral wash of the
+// foreground at a low alpha does that in either appearance. COLOR_EMPTY is
+// deliberately not used — it is a solid charcoal picked for the block bar's ░
+// glyphs, and at ring line widths it reads as a second filled arc.
 func ringTrackColor(_ appearance: NSAppearance) -> NSColor {
     let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-    return isDark ? NSColor.white.withAlphaComponent(0.25) : hexColor(COLOR_EMPTY)
+    return isDark ? NSColor.white.withAlphaComponent(0.18)
+                  : NSColor.black.withAlphaComponent(0.12)
 }
 
 // A missing reset keeps its row visible but never has a meaningful pace marker.
@@ -155,7 +171,100 @@ func shortReset(_ r: String) -> String? {
     return String(first)
 }
 
+/// Monospace ONLY for the block-bar glyphs (░█ need fixed advance).
 let barFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+/// HIG text: menus in the system menu font, numerics in monospaced digits
+/// so values change without the row (or the menu bar item) jittering.
+let menuLabelFont = NSFont.menuFont(ofSize: 0)
+let menuDigitFont = NSFont.monospacedDigitSystemFont(
+    ofSize: NSFont.menuFont(ofSize: 0).pointSize, weight: .regular)
+let statusFont = NSFont.menuBarFont(ofSize: 0)
+let statusDigitFont = NSFont.monospacedDigitSystemFont(
+    ofSize: NSFont.menuBarFont(ofSize: 0).pointSize, weight: .regular)
+
+/// Right-aligned numeric columns via tab stops, so SF Pro rows align without
+/// monospace space-padding. Locations in points from the item's leading edge.
+///
+/// Every location is measured rather than guessed, because a guessed grid is
+/// what left ~45 pt of air before the gauge and ~90 pt after the percentage:
+/// the stops were sized for provider names in rows that no longer carry
+/// numbers. The rows that do are labelled "Session", "Weekly", "Fable",
+/// "Extra usage" — 32–72 pt of text against a 128 pt column.
+///
+/// The label column is therefore sized per render, to the widest label the
+/// menu is about to draw (see `menuLabelColumn`), and the long tail is clipped
+/// (see `fitMenuLabel`) so one stray model name cannot stretch the grid for
+/// every other row. Measured in `menuLabelFont` at 13 pt:
+///
+///     Fable 32.5 · Weekly 43.7 · Session 47.1 · Extra usage 71.1
+///     Other Models 82.1 · Cursor Models 88.4 · Gemini Weekly 89.3
+///     Claude & GPT OSS Weekly 161.9 — the outlier the clip exists for
+let MENU_LABEL_MAX: CGFloat = 96   // fits every real two-word label
+let MENU_LABEL_GAP: CGFloat = 12   // label → gauge breathing room
+
+/// Indicator + value column: the widest percentage ("100%" = 36.3 pt in
+/// menuDigitFont) right-aligned clear of the gauge, plus ~8 pt. The gauge is
+/// the one width that is not constant — a ring is a single 18 pt attachment, a
+/// block bar is MENU_BAR_W (14) monospaced glyphs = 112.5 pt — so the numeric
+/// columns sit behind whichever style is on.
+let MENU_VALUE_RING: CGFloat = 62    // 18 ring + 36.3 pct + 8
+let MENU_VALUE_BLOCK: CGFloat = 157  // 112.5 bar + 36.3 pct + 8
+/// Reset column: the widest countdown ("↺ 12h 59m" = 69 pt) plus ~8 pt.
+let MENU_RESET_W: CGFloat = 77
+
+func menuTextWidth(_ s: String, _ font: NSFont) -> CGFloat {
+    (s as NSString).size(withAttributes: [.font: font]).width
+}
+
+/// Clip a number-carrying row's label so it cannot overrun the label column —
+/// an overrunning label does not merely look wide, it pushes the gauge onto
+/// the NEXT tab stop and breaks the row's alignment outright.
+///
+/// A character cap alone does not bound the width (14 wide glyphs,
+/// "Claude & GPT O…", still measure 108 pt against a 96 pt column), so the
+/// character cap keeps labels short and a width cap makes that guarantee.
+func fitMenuLabel(_ s: String) -> String {
+    var out = s.count > 14 ? String(s.prefix(14)) + "…" : s
+    while menuTextWidth(out, menuLabelFont) > MENU_LABEL_MAX, out.count > 2 {
+        out = String(out.dropLast(out.hasSuffix("…") ? 2 : 1)) + "…"
+    }
+    return out
+}
+
+/// Where the gauge column starts, for one render's worth of labels. Sizing to
+/// the labels actually on screen is what keeps the grid tight: a menu of
+/// Session/Weekly/Fable rows gets an 84 pt column, one carrying "Gemini
+/// Weekly" gets 102, and neither pays for the other.
+func menuLabelColumn(_ labels: [String]) -> CGFloat {
+    let widest = labels.map { menuTextWidth(fitMenuLabel($0), menuLabelFont) }.max() ?? 0
+    return ceil(widest) + MENU_LABEL_GAP
+}
+
+/// `wideValue` drops the percentage column. A right-aligned tab stop only
+/// right-aligns a run that FITS in the space before it; a longer one starts at
+/// the pen and overflows past the stop. A currency pair ("€24.53 / €50.00" =
+/// 100 pt) does not fit the 77 pt value column, so it used to straggle ~25 pt
+/// beyond where every reset above it ended. Those rows carry no countdown, so
+/// handing them the value and reset columns as one span (139 pt) lets them
+/// right-align flush on the reset stop with room to spare.
+func menuRowStyle(_ label: CGFloat, wideValue: Bool = false) -> NSParagraphStyle {
+    let s = NSMutableParagraphStyle()
+    let value = label + (BAR_STYLE == "ring" ? MENU_VALUE_RING : MENU_VALUE_BLOCK)
+    var stops = [NSTextTab(textAlignment: .left, location: label)]
+    if !wideValue { stops.append(NSTextTab(textAlignment: .right, location: value)) }
+    stops.append(NSTextTab(textAlignment: .right, location: value + MENU_RESET_W))
+    s.tabStops = stops
+    s.lineBreakMode = .byClipping
+    return s
+}
+
+/// A row's value is "wide" when it is not a percentage AND has no countdown
+/// to displace — the currency pair and the credit balance. Both conditions
+/// matter: the wide style has no percentage column, so a row that still owed a
+/// reset would have nowhere to put it.
+func menuValueIsWide(_ value: String, _ reset: String?) -> Bool {
+    !value.hasSuffix("%") && (reset ?? "").isEmpty
+}
 
 func run(_ s: String, _ color: NSColor, _ font: NSFont = barFont) -> NSAttributedString {
     NSAttributedString(string: s, attributes: [.foregroundColor: color, .font: font])
@@ -217,7 +326,7 @@ func ringImage(pct: Int, size: CGFloat, elapsed: Int?, appearance: NSAppearance)
     img.lockFocus()
 
     let box = NSRect(x: 0, y: 0, width: size, height: size)
-    let lw = max(1.6, size * 0.16)
+    let lw = max(1.5, size * 0.11)
     let inset = lw / 2 + 0.5
     let rect = box.insetBy(dx: inset, dy: inset)
     let start: CGFloat = -.pi / 2
@@ -244,6 +353,7 @@ func ringImage(pct: Int, size: CGFloat, elapsed: Int?, appearance: NSAppearance)
                       endAngle: a.endDeg,
                       clockwise: true)
         arc.lineWidth = lw
+        arc.lineCapStyle = .round   // fill reads as a stroke, not a pie slice
         color.setStroke()
         arc.stroke()
     }
@@ -286,6 +396,408 @@ final class ColoredAttachmentCell: NSTextAttachmentCell {
                    respectFlipped: true,
                    hints: nil)
     }
+}
+
+/// One provider as the status bar draws it: a severity dot and the bare number
+/// beside it. `pct == nil` is a dot with nothing to grade — a credit balance, a
+/// loading ellipsis, raw output from the binary.
+struct StatusEntry {
+    let pct: Int?
+    let text: String
+    /// Which provider this entry is, so the bar can draw its mark. Stored as
+    /// the raw id (`anthropic@work`, `anthropic-desktop@…`); the lookup folds
+    /// it to a base vendor, so every Claude account gets the same creature.
+    /// Empty where there is no provider to name — a loading placeholder, or
+    /// output from the binary nothing could parse.
+    var vendorId: String = ""
+}
+
+/// The status bar's calm tier, for a dot with no warning to give and for the
+/// rule between providers: dim enough to read as punctuation next to the number
+/// it belongs to, still legible on either menu bar. Baked for one appearance
+/// rather than left dynamic, because an attachment image is drawn once instead
+/// of resolved at paint time; an appearance flip re-renders the panel anyway.
+func statusDimColor(_ appearance: NSAppearance) -> NSColor {
+    menuBarTextColor(appearance).withAlphaComponent(0.5)
+}
+
+/// What color a percentage is in the status bar: the same tiers as the
+/// dropdown (`colorForPct`), low tier neutral.
+///
+/// Everything from MID (50) up matches the dropdown exactly, so the bar can no
+/// longer read calm about a number the menu has already turned amber. The low
+/// tier is the one deliberate difference: the dropdown can afford COLOR_LOW's
+/// green because it is a table being read, while a permanently green dot in
+/// the menu bar is a light that only ever means "ignore me". `nil` is nothing
+/// to grade — a credit balance, a loading ellipsis, raw output.
+func tierColor(pct: Int?, appearance: NSAppearance) -> NSColor {
+    switch pct {
+    case .some(let p) where p >= 90: return hexColor(COLOR_CRITICAL)
+    case .some(let p) where p >= 75: return hexColor(COLOR_HIGH)
+    case .some(let p) where p >= 50: return hexColor(COLOR_MID)
+    default: return statusDimColor(appearance)
+    }
+}
+
+/// One provider's severity, as a dot sized to sit beside the menu bar's digits.
+/// `trailing` is transparent padding baked into the image: spacing here is
+/// measured in points, and the width of a space glyph follows the font.
+func statusDotImage(pct: Int?, appearance: NSAppearance,
+                    size: CGFloat = 7, trailing: CGFloat = 3) -> NSImage {
+    let img = NSImage(size: NSSize(width: size + trailing, height: size))
+    img.lockFocus()
+    tierColor(pct: pct, appearance: appearance).setFill()
+    NSBezierPath(ovalIn: NSRect(x: 0, y: 0, width: size, height: size)).fill()
+    img.unlockFocus()
+    return img
+}
+
+/// The mark between two providers: a short rule at digit height, so the bar
+/// reads as pairs instead of one long number. Deliberately not a pipe glyph —
+/// a full-height bar would out-shout the dots it is separating. Padding either
+/// side is baked in for the same reason the dot's is.
+func statusDividerImage(appearance: NSAppearance,
+                        height: CGFloat = 9, gap: CGFloat = 5) -> NSImage {
+    let width: CGFloat = 1
+    let img = NSImage(size: NSSize(width: width + gap * 2, height: height))
+    img.lockFocus()
+    statusDimColor(appearance).setFill()
+    NSBezierPath(rect: NSRect(x: gap, y: 0, width: width, height: height)).fill()
+    img.unlockFocus()
+    return img
+}
+
+/// Wrap a status-bar glyph as an inline attachment, centered on the digits' cap
+/// height rather than left sitting on the baseline — the same correction
+/// ringAttr makes, measured against the font the numbers are set in.
+func statusAttachment(_ image: NSImage) -> NSAttributedString {
+    let attachment = NSTextAttachment()
+    attachment.image = image
+    attachment.attachmentCell = ColoredAttachmentCell(imageCell: image)
+    let dy = (statusDigitFont.capHeight - image.size.height) / 2
+    attachment.bounds = NSRect(x: 0, y: dy,
+                               width: image.size.width, height: image.size.height)
+    return NSAttributedString(attachment: attachment)
+}
+
+/// The provider marks — the "Cuties". Exported from the design
+/// playground (`tools/ai-usagebar-en/playground/index.html`) by
+/// `marks_export.py`. Edit the shapes THERE and re-run `./apply.sh` —
+/// this table is generated, never typed by hand.
+/// Variant picks resolved: claude C, deepseek A, openai A.
+///
+/// Coordinates are SVG, viewBox 0 0 20 20, y pointing DOWN. A part is
+/// either filled (`evenOdd` picks the winding rule, so a detail cut into
+/// the silhouette is a real hole the menu bar shows through) or stroked
+/// at `stroke` viewBox units with round caps and joins.
+struct MarkPart {
+    let d: String
+    let evenOdd: Bool
+    let stroke: CGFloat?
+}
+
+/// Stable order for anything that shows the whole set (the render harness).
+let PROVIDER_MARK_ORDER: [String] = [
+    "claude", "anthropicApi", "openai", "gemini", "grok", "deepseek",
+    "moonshot", "kimi", "zai", "openrouter", "cursor", "kilo", "novita",
+    "mistral", "meta"
+]
+
+let PROVIDER_MARKS: [String: [MarkPart]] = [
+    "claude": [
+        MarkPart(d: "M4.5 3 H15.5 C16.3 3 17 3.7 17 4.5 V13.5 C17 14.3 16.3 15 15.5 15 H4.5 C3.7 15 3 14.3 3 13.5 V4.5 C3 3.7 3.7 3 4.5 3 Z M6 6.5 H8 V11 H6 Z M12 6.5 H14 V11 H12 Z M5 15 H7.5 V17.5 C7.5 17.8 7.3 18 7 18 H5.5 C5.2 18 5 17.8 5 17.5 Z M12.5 15 H15 V17.5 C15 17.8 14.8 18 14.5 18 H13 C12.7 18 12.5 17.8 12.5 17.5 Z M1 8 H3 V11 H1 Z M17 8 H19 V11 H17 Z",
+                 evenOdd: true, stroke: nil),
+    ],
+    "anthropicApi": [
+        MarkPart(d: "M6 3 H14 C16.2 3 18 4.8 18 7 V13 C18 15.2 16.2 17 14 17 H6 C3.8 17 2 15.2 2 13 V7 C2 4.8 3.8 3 6 3 Z M6 5 H14 C15.11 5 16 5.89 16 7 V13 C16 14.11 15.11 15 14 15 H6 C4.89 15 4 14.11 4 13 V7 C4 5.89 4.89 5 6 5 Z M5.6 6.5 L10.2 10 L5.6 13.5 L5.6 11 L6.9 10 L5.6 9 Z M11.9 11.7 L14.3 11.7 Q14.8 11.7 14.8 12.2 L14.8 13 Q14.8 13.5 14.3 13.5 L11.9 13.5 Q11.4 13.5 11.4 13 L11.4 12.2 Q11.4 11.7 11.9 11.7 Z",
+                 evenOdd: true, stroke: nil),
+    ],
+    "openai": [
+        MarkPart(d: "M10 2 L16.93 6 L16.93 14 L10 18 L3.07 14 L3.07 6 Z",
+                 evenOdd: false, stroke: 2.5),
+    ],
+    "gemini": [
+        MarkPart(d: "M10 1.5 Q11 9 18.5 10 Q11 11 10 18.5 Q9 11 1.5 10 Q9 9 10 1.5 Z",
+                 evenOdd: false, stroke: nil),
+    ],
+    "grok": [
+        MarkPart(d: "M4.4 4.4 L15.6 15.6 M15.6 4.4 L7.5 12.5",
+                 evenOdd: false, stroke: 2.5),
+    ],
+    "deepseek": [
+        MarkPart(d: "M3.2 11.6 C3.2 8.6 5.6 6.8 8.4 6.8 C10.9 6.8 12.8 8 13.8 9.8 L17.4 5.6 C18.2 4.7 19.2 5.8 18.5 6.8 L15.6 10.8 C15.2 13.4 12.4 15.4 9 15.4 C5.6 15.4 3.2 13.8 3.2 11.6 Z M6.6 9.15 C7.18 9.15 7.65 9.62 7.65 10.2 C7.65 10.78 7.18 11.25 6.6 11.25 C6.02 11.25 5.55 10.78 5.55 10.2 C5.55 9.62 6.02 9.15 6.6 9.15 Z",
+                 evenOdd: true, stroke: nil),
+    ],
+    "moonshot": [
+        MarkPart(d: "M15.09 3.83 C11.83 1.14 7.05 1.45 4.16 4.53 C1.28 7.6 1.28 12.4 4.16 15.47 C7.05 18.55 11.83 18.86 15.09 16.17 C12.49 16.89 9.72 15.89 8.16 13.68 C6.61 11.47 6.61 8.53 8.16 6.32 C9.72 4.11 12.49 3.11 15.09 3.83 Z",
+                 evenOdd: false, stroke: nil),
+    ],
+    "kimi": [
+        MarkPart(d: "M6 3 H14 C16.2 3 18 4.8 18 7 V13 C18 15.2 16.2 17 14 17 H6 C3.8 17 2 15.2 2 13 V7 C2 4.8 3.8 3 6 3 Z M6 5 H14 C15.11 5 16 5.89 16 7 V13 C16 14.11 15.11 15 14 15 H6 C4.89 15 4 14.11 4 13 V7 C4 5.89 4.89 5 6 5 Z M6.55 6.5 L7.85 6.5 Q8.2 6.5 8.2 6.85 L8.2 8.65 Q8.2 9 8.46 8.77 L10.74 6.73 Q11 6.5 11.35 6.5 L13.25 6.5 Q13.6 6.5 13.34 6.74 L10.06 9.76 Q9.8 10 10.06 10.24 L13.34 13.26 Q13.6 13.5 13.25 13.5 L11.35 13.5 Q11 13.5 10.74 13.27 L8.46 11.23 Q8.2 11 8.2 11.35 L8.2 13.15 Q8.2 13.5 7.85 13.5 L6.55 13.5 Q6.2 13.5 6.2 13.15 L6.2 6.85 Q6.2 6.5 6.55 6.5 Z",
+                 evenOdd: true, stroke: nil),
+    ],
+    "zai": [
+        MarkPart(d: "M14.34 2.21 L11.44 7.67 Q11.02 8.46 11.92 8.46 L16.92 8.46 Q17.82 8.46 17.13 9.04 L6.61 18 Q5.92 18.58 6.31 17.77 L8.93 12.35 Q9.32 11.54 8.42 11.54 L3.08 11.54 Q2.18 11.54 2.88 10.98 L14.06 1.98 Q14.76 1.42 14.34 2.21 Z",
+                 evenOdd: false, stroke: nil),
+    ],
+    "openrouter": [
+        MarkPart(d: "M4.6 4.6 L10 11 L15.4 4.6 M10 11 L10 17.4 M3.9 3.9 H5.3 V5.3 H3.9 Z M14.7 3.9 H16.1 V5.3 H14.7 Z M9.3 16.7 H10.7 V18.1 H9.3 Z",
+                 evenOdd: false, stroke: 2.5),
+    ],
+    "cursor": [
+        MarkPart(d: "M4 3.3 L4 15.7 Q4 16.6 4.65 15.98 L7.35 13.42 Q8 12.8 8.42 13.6 L10.18 17 Q10.6 17.8 11.4 17.4 L12.2 17 Q13 16.6 12.58 15.8 L10.92 12.6 Q10.5 11.8 11.4 11.8 L14.7 11.8 Q15.6 11.8 14.9 11.23 L4.7 2.97 Q4 2.4 4 3.3 Z",
+                 evenOdd: false, stroke: nil),
+    ],
+    "kilo": [
+        MarkPart(d: "M3.9 5.6 L4.9 5.6 Q6.4 5.6 6.4 7.1 L6.4 12.9 Q6.4 14.4 4.9 14.4 L3.9 14.4 Q2.4 14.4 2.4 12.9 L2.4 7.1 Q2.4 5.6 3.9 5.6 Z M15.1 5.6 L16.1 5.6 Q17.6 5.6 17.6 7.1 L17.6 12.9 Q17.6 14.4 16.1 14.4 L15.1 14.4 Q13.6 14.4 13.6 12.9 L13.6 7.1 Q13.6 5.6 15.1 5.6 Z M6.6 8.6 L13.4 8.6 Q14.4 8.6 14.4 9.6 L14.4 10.4 Q14.4 11.4 13.4 11.4 L6.6 11.4 Q5.6 11.4 5.6 10.4 L5.6 9.6 Q5.6 8.6 6.6 8.6 Z",
+                 evenOdd: false, stroke: nil),
+    ],
+    "novita": [
+        MarkPart(d: "M10.36 1.88 L11.99 5.88 Q12.35 6.76 13.3 6.83 L17.61 7.15 Q18.56 7.22 17.83 7.83 L14.53 10.62 Q13.8 11.24 14.03 12.16 L15.06 16.36 Q15.29 17.28 14.48 16.78 L10.81 14.5 Q10 14 9.19 14.5 L5.52 16.78 Q4.71 17.28 4.94 16.36 L5.97 12.16 Q6.2 11.24 5.47 10.62 L2.17 7.83 Q1.44 7.22 2.39 7.15 L6.7 6.83 Q7.65 6.76 8.01 5.88 L9.64 1.88 Q10 1 10.36 1.88 Z",
+                 evenOdd: false, stroke: nil),
+    ],
+    "mistral": [
+        MarkPart(d: "M2.6 15.3 L2.6 4.7 Q2.6 4 3.3 4 L4.9 4 Q5.6 4 5.97 4.59 L9.63 10.41 Q10 11 10.37 10.41 L14.03 4.59 Q14.4 4 15.1 4 L16.7 4 Q17.4 4 17.4 4.7 L17.4 15.3 Q17.4 16 16.7 16 L15.3 16 Q14.6 16 14.6 15.3 L14.6 9.1 Q14.6 8.4 14.21 8.98 L11.09 13.62 Q10.7 14.2 10 14.2 L10 14.2 Q9.3 14.2 8.91 13.62 L5.79 8.98 Q5.4 8.4 5.4 9.1 L5.4 15.3 Q5.4 16 4.7 16 L3.3 16 Q2.6 16 2.6 15.3 Z",
+                 evenOdd: false, stroke: nil),
+    ],
+    "meta": [
+        MarkPart(d: "M10 10 C8.4 6.8 6.8 6.4 5.4 7 C3.6 7.8 3.6 12.2 5.4 13 C6.8 13.6 8.4 13.2 10 10 C11.6 6.8 13.2 6.4 14.6 7 C16.4 7.8 16.4 12.2 14.6 13 C13.2 13.6 11.6 13.2 10 10 Z",
+                 evenOdd: false, stroke: 2.5),
+    ],
+]
+
+/// The mark box is 20 × 20 viewBox units, whatever size it is drawn at.
+let MARK_BOX: CGFloat = 20
+
+/// Vendor id → mark id. Keyed on the BASE vendor, so "anthropic@work" and a
+/// Claude Desktop account both land on the same creature. Deliberately allowed
+/// to be incomplete: a provider with no mark of its own draws its dot, which is
+/// a face the bar already knows how to make.
+let VENDOR_MARK_IDS: [String: String] = [
+    "anthropic": "claude",
+    "anthropic_api": "anthropicApi",
+    "openai": "openai",
+    "antigravity": "gemini",
+    "grok": "grok",
+    "deepseek": "deepseek",
+    "moonshot": "moonshot",
+    "kimi": "kimi",
+    "zai": "zai",
+    "openrouter": "openrouter",
+    "cursor": "cursor",
+    "kilo": "kilo",
+    "novita": "novita",
+]
+
+/// The mark a vendor draws, or nil if it has none yet.
+func markId(forVendor id: String) -> String? {
+    id.isEmpty ? nil : VENDOR_MARK_IDS[baseVendorId(id)]
+}
+
+/// Parse an SVG path into an NSBezierPath, in the path's own coordinates
+/// (viewBox units, y pointing DOWN — flipping is the caller's job).
+///
+/// ABSOLUTE `M L H V C Q Z` only, which is exactly what the playground authors
+/// and `marks_export.py` enforces on the way out. The narrowness is the point:
+/// a relative command or an arc quietly drawn as something else would put a
+/// plausible but WRONG shape in the menu bar, so anything outside the set is
+/// refused here — logged, and nil, which makes the caller fall back to the dot.
+/// Q is folded into a cubic on the way in; NSBezierPath has no quadratic
+/// segment, and the conversion is exact.
+func bezierPath(svg d: String) -> NSBezierPath? {
+    enum Token { case command(Character), number(CGFloat) }
+    func reject(_ why: String) -> NSBezierPath? {
+        NSLog("ai-usagebar: bad mark path (%@) in \"%@\"", why, d)
+        assertionFailure("bad mark path (\(why)): \(d)")
+        return nil
+    }
+
+    var tokens: [Token] = []
+    let chars = Array(d)
+    var i = 0
+    while i < chars.count {
+        let c = chars[i]
+        if c == " " || c == "," || c == "\n" || c == "\t" || c == "\r" {
+            i += 1
+        } else if c.isLetter {
+            guard "MLHVCQZ".contains(c) else { return reject("unsupported command \(c)") }
+            tokens.append(.command(c))
+            i += 1
+        } else {
+            var text = ""
+            if c == "-" || c == "+" { text.append(c); i += 1 }
+            while i < chars.count, chars[i].isNumber || chars[i] == "." {
+                text.append(chars[i]); i += 1
+            }
+            guard let value = Double(text) else { return reject("not a number: \(text)") }
+            tokens.append(.number(CGFloat(value)))
+        }
+    }
+
+    let path = NSBezierPath()
+    var at = 0
+    var current = CGPoint.zero, subpathStart = CGPoint.zero
+    var command: Character = " "
+    var started = false
+    /// The next `n` numbers, or nil if the command was handed fewer than it needs.
+    func take(_ n: Int) -> [CGFloat]? {
+        var out: [CGFloat] = []
+        while out.count < n {
+            guard at < tokens.count, case .number(let v) = tokens[at] else { return nil }
+            out.append(v)
+            at += 1
+        }
+        return out
+    }
+
+    while at < tokens.count {
+        var explicit = false
+        if case .command(let c) = tokens[at] { command = c; at += 1; explicit = true }
+        guard command != " " else { return reject("numbers before any command") }
+        guard started || command == "M" else { return reject("\(command) before the first M") }
+        switch command {
+        case "M":
+            guard let a = take(2) else { return reject("M needs 2 numbers") }
+            current = CGPoint(x: a[0], y: a[1])
+            subpathStart = current
+            path.move(to: current)
+            started = true
+            command = "L"   // SVG: extra coordinate pairs after an M are lines
+        case "L":
+            guard let a = take(2) else { return reject("L needs 2 numbers") }
+            current = CGPoint(x: a[0], y: a[1])
+            path.line(to: current)
+        case "H":
+            guard let a = take(1) else { return reject("H needs 1 number") }
+            current.x = a[0]
+            path.line(to: current)
+        case "V":
+            guard let a = take(1) else { return reject("V needs 1 number") }
+            current.y = a[0]
+            path.line(to: current)
+        case "C":
+            guard let a = take(6) else { return reject("C needs 6 numbers") }
+            current = CGPoint(x: a[4], y: a[5])
+            path.curve(to: current,
+                       controlPoint1: CGPoint(x: a[0], y: a[1]),
+                       controlPoint2: CGPoint(x: a[2], y: a[3]))
+        case "Q":
+            guard let a = take(4) else { return reject("Q needs 4 numbers") }
+            // A quadratic is the cubic whose two controls sit two thirds of the
+            // way from each end point toward the quadratic's single control.
+            let q = CGPoint(x: a[0], y: a[1]), end = CGPoint(x: a[2], y: a[3])
+            path.curve(to: end,
+                       controlPoint1: CGPoint(x: current.x + 2.0 / 3.0 * (q.x - current.x),
+                                              y: current.y + 2.0 / 3.0 * (q.y - current.y)),
+                       controlPoint2: CGPoint(x: end.x + 2.0 / 3.0 * (q.x - end.x),
+                                              y: end.y + 2.0 / 3.0 * (q.y - end.y)))
+            current = end
+        case "Z":
+            guard explicit else { return reject("numbers after Z") }
+            path.close()
+            current = subpathStart
+        default:
+            return reject("unsupported command \(command)")
+        }
+    }
+    guard started else { return reject("empty path") }
+    return path
+}
+
+/// One provider's mark, drawn at the height the menu bar's digits are set at
+/// and in the SAME tier color a dot would have taken — the glyph changes, the
+/// severity language does not. Nil for an unknown id or an unparsable path, so
+/// the caller can fall back to the dot; `trailing` is transparent padding baked
+/// into the canvas, exactly as in `statusDotImage`.
+func statusMarkImage(markId: String, pct: Int?, appearance: NSAppearance,
+                     size: CGFloat = 10, trailing: CGFloat = 3) -> NSImage? {
+    guard let parts = PROVIDER_MARKS[markId], !parts.isEmpty else { return nil }
+    let scale = size / MARK_BOX
+    // SVG's y grows downward and AppKit's grows up: scale and flip about the
+    // box in one transform, so the path arrives in image coordinates.
+    let flip = AffineTransform(m11: scale, m12: 0, m21: 0, m22: -scale, tX: 0, tY: size)
+    var drawable: [(path: NSBezierPath, part: MarkPart)] = []
+    for part in parts {
+        guard let path = bezierPath(svg: part.d) else { return nil }
+        path.transform(using: flip)
+        drawable.append((path, part))
+    }
+    let img = NSImage(size: NSSize(width: size + trailing, height: size))
+    img.lockFocus()
+    tierColor(pct: pct, appearance: appearance).set()
+    for (path, part) in drawable {
+        if let stroke = part.stroke {
+            path.lineWidth = stroke * scale
+            path.lineCapStyle = .round
+            path.lineJoinStyle = .round
+            path.stroke()
+        } else {
+            // Details are cut as real holes, so the menu bar shows through them
+            // instead of the mark carrying a second, painted-on color.
+            path.windingRule = part.evenOdd ? .evenOdd : .nonZero
+            path.fill()
+        }
+    }
+    img.unlockFocus()
+    return img
+}
+
+/// Every mark path, parsed. Returns the ones that failed, so a bad path is
+/// caught by a harness rather than by Niels noticing a gap in his menu bar:
+/// `-O` strips the assertion out of the shipping build, and `render-marks.sh`
+/// exits non-zero on a non-empty list.
+func validateProviderMarks() -> [String] {
+    var broken: [String] = []
+    for id in PROVIDER_MARK_ORDER {
+        guard let parts = PROVIDER_MARKS[id], !parts.isEmpty else {
+            broken.append("\(id): no parts")
+            continue
+        }
+        for (n, part) in parts.enumerated() where bezierPath(svg: part.d) == nil {
+            broken.append("\(id)[\(n)]: path did not parse")
+        }
+    }
+    return broken
+}
+
+/// The status item's title for a glyph face — the compact row of provider
+/// pairs, or the icon-only row of bare glyphs ("text" mode never reaches here).
+/// A free function rather than a delegate method so the offscreen render
+/// harness (`render-marks.sh`) draws the face the bar actually shows, instead
+/// of a copy of this layout that drifts from it.
+func statusFaceTitle(_ entries: [StatusEntry], mode: String, glyph: String,
+                     appearance: NSAppearance) -> NSAttributedString {
+    // Nothing to report still needs a status item to click on.
+    let shown = entries.isEmpty ? [StatusEntry(pct: nil, text: "—")] : entries
+    // Dots or Cuties, decided once for the whole row so the two faces cannot
+    // end up speaking different languages. A provider with no mark — or one
+    // whose path failed to parse — falls back to its dot rather than leaving a
+    // hole where a provider should be.
+    func glyphImage(_ e: StatusEntry, trailing: CGFloat) -> NSImage {
+        if glyph == "mark", let id = markId(forVendor: e.vendorId),
+           let mark = statusMarkImage(markId: id, pct: e.pct, appearance: appearance,
+                                      trailing: trailing) {
+            return mark
+        }
+        return statusDotImage(pct: e.pct, appearance: appearance, trailing: trailing)
+    }
+    let title = NSMutableAttributedString()
+    for (i, e) in shown.enumerated() {
+        if mode == "compact" {
+            if i > 0 { title.append(statusAttachment(statusDividerImage(appearance: appearance))) }
+            title.append(statusAttachment(glyphImage(e, trailing: 3)))
+            // The numbers ARE the readout, so they stay in the menu bar's own
+            // text color whatever they say: colored digits next to a row of
+            // monochrome system icons read as noise, and severity is the
+            // glyph's job. The color has to be set explicitly — an attributed
+            // string without one draws black, invisible on a dark menu bar.
+            title.append(run(e.text, .labelColor, statusDigitFont))
+        } else {
+            let last = i == shown.count - 1
+            title.append(statusAttachment(glyphImage(e, trailing: last ? 0 : 4)))
+        }
+    }
+    return title
 }
 
 func ringAttr(pct: Int, size: CGFloat, elapsed: Int?, appearance: NSAppearance) -> NSAttributedString {
@@ -957,7 +1469,7 @@ func vendorEntries(active: String, usageAccounts: [UsageAccount]? = nil) -> [Men
 
 /// Display name for any selectable id (base vendor, account, or overview).
 func entryDisplayName(_ id: String) -> String {
-    if id == "overview" { return "Visão geral" }
+    if id == "overview" { return "Overview" }
     if let label = accountLabel(of: id) {
         let base = baseVendorId(id)
         let vendor = VENDOR_AUTH.first { $0.id == base }?.name ?? base
@@ -1082,7 +1594,7 @@ func switchArgs(label: String, desktop: Bool, deleting: [String] = []) -> [Strin
 func conflictPreview(_ conflicts: [DeletionConflict], limit: Int = 10) -> String {
     var lines = conflicts.prefix(limit).map { "• \($0.line)" }
     if conflicts.count > limit {
-        lines.append("… e mais \(conflicts.count - limit)")
+        lines.append("… and \(conflicts.count - limit) more")
     }
     return lines.joined(separator: "\n")
 }
@@ -1095,7 +1607,7 @@ func addAccountScript(binary: String, label: String, desktop: Bool) -> String {
     func quote(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
     return "#!/usr/bin/env bash\n"
         + "\(quote(binary)) account add \(quote(label))\(desktop ? " --desktop" : "")\n"
-        + "echo; read -n 1 -s -r -p 'Pressione qualquer tecla para fechar…'\n"
+        + "echo; read -n 1 -s -r -p 'Press any key to close…'\n"
 }
 
 /// Rust defaults (`src/config.rs`): the OAuth/api-key vendors that ship enabled,
@@ -1204,19 +1716,19 @@ func oauthScript(_ v: VendorAuth) -> String {
     if command -v \(v.cli) >/dev/null 2>&1; then
       \(v.login)
     else
-      echo "\(v.cli) nao encontrado. Instalo em ~/.local sem sudo. Pacote: \(v.pkg)"
-      read -p "Instalar agora? [y/N] " a
+      echo "\(v.cli) not found. Installing to ~/.local without sudo. Package: \(v.pkg)"
+      read -p "Install now? [y/N] " a
       if [ "$a" = y ] || [ "$a" = Y ]; then npm i -g --prefix "$HOME/.local" \(v.pkg) && hash -r && \(v.login); fi
     fi
     echo
-    read -p "Enter para fechar..."
+    read -p "Enter to close..."
     """
 }
 
 func openTuiInTerminal() {
     let cargo = "\(NSHomeDirectory())/.cargo/bin/ai-usagebar-tui"
     let tui = FileManager.default.isExecutableFile(atPath: cargo) ? cargo : "ai-usagebar-tui"
-    runInTerminal("\"\(tui)\"\necho\nread -p \"Enter para fechar...\"")
+    runInTerminal("\"\(tui)\"\necho\nread -p \"Enter to close...\"")
 }
 
 // Launch a .app by name (e.g. "Cursor") via `open -a`, so a local-kind vendor's
@@ -1247,7 +1759,7 @@ struct VendorsSection: View {
                     }
                 }
                 if checking {
-                    Text("verificando…").font(.caption).foregroundColor(.secondary)
+                    Text("checking…").font(.caption).foregroundColor(.secondary)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1275,31 +1787,31 @@ struct VendorsSection: View {
     }
 
     private func statusText(_ v: VendorAuth) -> String {
-        if configured[v.id] == true { return "✓ Configurado" }
+        if configured[v.id] == true { return "✓ Configured" }
         if v.kind == "oauth" {
-            if cliPresent[v.id] == false { return "⚠ \(v.cli) não instalado" }
-            return "⚠ Não logado — \(v.login)"
+            if cliPresent[v.id] == false { return "⚠ \(v.cli) not installed" }
+            return "⚠ Not signed in — \(v.login)"
         }
         // Local vendors have no key: "configured" means signed in to the app
         // AND the vendor's own section enabled in config.
         if v.id == "antigravity" {
-            return "⚠ Abra o Antigravity (app, IDE ou agy) e ative [antigravity] no config"
+            return "⚠ Open Antigravity (app, IDE, or agy) and enable [antigravity] in config"
         }
         if v.kind == "local" {
-            return "⚠ Entre no app Cursor e ative [cursor] no config"
+            return "⚠ Sign in to the Cursor app and enable [cursor] in config"
         }
-        return "⚠ Sem API key — \(apiKeyEnvironment(v))"
+        return "⚠ No API key — \(apiKeyEnvironment(v))"
     }
 
     private func buttonLabel(_ v: VendorAuth) -> String {
         if v.kind == "oauth" {
-            if configured[v.id] == true { return "Re-logar" }
-            if cliPresent[v.id] == false { return "Instalar + logar" }
-            return "Logar"
+            if configured[v.id] == true { return "Sign In Again" }
+            if cliPresent[v.id] == false { return "Install + Sign In" }
+            return "Sign In"
         }
-        if v.id == "antigravity" { return "Abrir Antigravity" }
-        if v.kind == "local" { return "Abrir Cursor" }
-        return "Configurar (TUI)"
+        if v.id == "antigravity" { return "Open Antigravity" }
+        if v.kind == "local" { return "Open Cursor" }
+        return "Configure (TUI)"
     }
 
     private func action(_ v: VendorAuth) {
@@ -1322,6 +1834,8 @@ struct SettingsView: View {
     @AppStorage("showBars") private var showBars = true
     @AppStorage("showMeta") private var showMeta = true
     @AppStorage("barStyle") private var barStyle = "block"
+    @AppStorage("menuBarMode") private var menuBarMode = "compact"
+    @AppStorage("menuBarGlyph") private var menuBarGlyph = "dot"
     @AppStorage("swapShortcutEnabled") private var swapShortcutEnabled = true
     @AppStorage("compactShortcutEnabled") private var compactShortcutEnabled = true
     @AppStorage("colorLow") private var colorLow = "#98c379"
@@ -1337,7 +1851,7 @@ struct SettingsView: View {
     // (deepseek/kimi/kilo/novita/moonshot/grok/anthropic_api) as disabled when
     // their `[vendor].enabled` is omitted, and so must this picker. Claude
     // accounts appear as their `vendor@<label>` pseudo-ids, same as the
-    // "Trocar vendor" submenu.
+    // "Switch Vendor" submenu.
     private var vendors: [String] {
         var ids = VENDOR_AUTH.filter { vendorEnabled($0) }.map { $0.id }
         let labels = claudeAccountLabels()
@@ -1350,7 +1864,7 @@ struct SettingsView: View {
                 contentsOf: openRouterLabels.map { OPENROUTER_ACCOUNT_ID_PREFIX + $0 },
                 at: at + 1)
         }
-        return ids
+        return ids + ["overview"]
     }
 
     var body: some View {
@@ -1359,56 +1873,65 @@ struct SettingsView: View {
         // a plain Form clipped its top rows with no way to reach them.
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 18) {
-                GroupBox("Exibição") {
+                GroupBox("Display") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Toggle("Mostrar barra de 5h (sessão)", isOn: $showSession)
-                        Toggle("Mostrar barra semanal", isOn: $showWeekly)
-                        Toggle("Mostrar barra de uso extra ($)", isOn: $showExtra)
-                        Toggle("Mostrar porcentagem/valor", isOn: $showPercent)
-                        Toggle("Mostrar barras (off = só números)", isOn: $showBars)
-                        Toggle("Mostrar referência da meta (linha de ritmo)", isOn: $showMeta)
-                        Picker("Estilo do indicador", selection: $barStyle) {
-                            Text("Barras (░█)").tag("block")
-                            Text("Anel (○)").tag("ring")
+                        Toggle("Show 5h bar (session)", isOn: $showSession)
+                        Toggle("Show weekly bar", isOn: $showWeekly)
+                        Toggle("Show extra-usage bar ($)", isOn: $showExtra)
+                        Toggle("Show percentage/value", isOn: $showPercent)
+                        Toggle("Show bars (off = numbers only)", isOn: $showBars)
+                        Toggle("Show target line (pacing)", isOn: $showMeta)
+                        Picker("Indicator style", selection: $barStyle) {
+                            Text("Bars (░█)").tag("block")
+                            Text("Ring (○)").tag("ring")
                         }
-                        Stepper("Largura da barra: \(barWidth)", value: $barWidth, in: 4...20)
+                        Picker("Menu bar", selection: $menuBarMode) {
+                            Text("Icon only").tag("icon")
+                            Text("Compact").tag("compact")
+                            Text("Full text").tag("text")
+                        }
+                        Picker("Provider marks", selection: $menuBarGlyph) {
+                            Text("Dots").tag("dot")
+                            Text("Cuties").tag("mark")
+                        }
+                        Stepper("Bar width: \(barWidth)", value: $barWidth, in: 4...20)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                GroupBox("Atalho") {
+                GroupBox("Shortcuts") {
                     VStack(alignment: .leading, spacing: 4) {
-                        Toggle("Trocar vendor com ⌥⌘\\ (atalho global)", isOn: $swapShortcutEnabled)
-                        Text("Alterna o vendor ativo a partir de qualquer app.")
+                        Toggle("Switch vendor with ⌥⌘\\ (global shortcut)", isOn: $swapShortcutEnabled)
+                        Text("Switches the active vendor from any app.")
                             .font(.caption).foregroundColor(.secondary)
-                        Toggle("Compactar/Expandir com ⌥⌘E (atalho global)", isOn: $compactShortcutEnabled)
-                        Text("Alterna a Visão geral entre barras e modo compacto.")
+                        Toggle("Collapse/expand with ⌥⌘E (global shortcut)", isOn: $compactShortcutEnabled)
+                        Text("Switches Overview between bars and compact mode.")
                             .font(.caption).foregroundColor(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                GroupBox("Cores") {
+                GroupBox("Colors") {
                     VStack(alignment: .leading, spacing: 8) {
-                        HexColorPicker(title: "Baixo (<50%)", hex: $colorLow)
-                        HexColorPicker(title: "Médio (50–74%)", hex: $colorMid)
-                        HexColorPicker(title: "Alto (75–89%)", hex: $colorHigh)
-                        HexColorPicker(title: "Crítico (≥90%)", hex: $colorCritical)
-                        HexColorPicker(title: "Vazio (fundo da barra)", hex: $colorEmpty)
+                        HexColorPicker(title: "Low (<50%)", hex: $colorLow)
+                        HexColorPicker(title: "Medium (50–74%)", hex: $colorMid)
+                        HexColorPicker(title: "High (75–89%)", hex: $colorHigh)
+                        HexColorPicker(title: "Critical (≥90%)", hex: $colorCritical)
+                        HexColorPicker(title: "Empty (bar background)", hex: $colorEmpty)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                GroupBox("Dados") {
+                GroupBox("Data") {
                     VStack(alignment: .leading, spacing: 8) {
                         Picker("Vendor", selection: $vendor) {
-                            ForEach(vendors, id: \.self) { Text($0) }
+                            ForEach(vendors, id: \.self) { Text(entryDisplayName($0)).tag($0) }
                         }
-                        Stepper("Intervalo: \(Int(interval))s", value: $interval, in: 5...3600, step: 5)
-                        TextField("Caminho do binário (vazio = auto)", text: $binaryPath)
+                        Stepper("Interval: \(Int(interval))s", value: $interval, in: 5...3600, step: 5)
+                        TextField("Binary path (empty = auto)", text: $binaryPath)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                GroupBox("Sistema") {
+                GroupBox("System") {
                     VStack(alignment: .leading, spacing: 4) {
-                        Toggle("Iniciar no login", isOn: Binding(
+                        Toggle("Start at login", isOn: Binding(
                             get: { launchAtLogin },
                             set: { enabled in
                                 do {
@@ -1420,10 +1943,10 @@ struct SettingsView: View {
                                     launchAtLoginError = error.localizedDescription
                                 }
                             }))
-                        Text("Instala um LaunchAgent que sobe o app ao entrar na sua conta.")
+                        Text("Installs a LaunchAgent that starts the app when you log in.")
                             .font(.caption).foregroundColor(.secondary)
                         if let error = launchAtLoginError {
-                            Text("Não foi possível atualizar: \(error)")
+                            Text("Could not refresh: \(error)")
                                 .font(.caption).foregroundColor(.red)
                         }
                     }
@@ -1511,7 +2034,7 @@ let swapHotKeyNotification = Notification.Name("aiusagebar.swapHotKey")
 let compactHotKeyNotification = Notification.Name("aiusagebar.compactHotKey")
 
 /// Default shortcuts: `\` (kVK_ANSI_Backslash) with Command+Option swaps the
-/// vendor; `E` with Command+Option toggles the overview's Compactar/Expandir.
+/// vendor; `E` with Command+Option toggles the overview's Compact/Expand.
 /// `[ui]` on Linux has no equivalent; this is macOS-only.
 let SWAP_HOTKEY_KEYCODE = UInt32(kVK_ANSI_Backslash)
 let COMPACT_HOTKEY_KEYCODE = UInt32(kVK_ANSI_E)
@@ -1536,7 +2059,7 @@ private func swapHotKeyCallback(
 }
 
 /// Whether the overview status-bar title draws mini bars (vs. the compact
-/// %-text mode). "Compactar" forces the text mode even under the bars-count
+/// %-text mode). "Compact" forces the text mode even under the bars-count
 /// threshold. Pure + testable — the render path is not.
 func overviewUsesBars(count: Int, barsMax: Int, compact: Bool) -> Bool {
     !compact && count <= barsMax
@@ -1627,10 +2150,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // Rebuilt on every render so only configured vendors show, and the active
     // one is checked. Kept as a field so the menu owns it for its lifetime.
     let vendorSubmenu = NSMenu()
-    let vendorSubmenuItem = NSMenuItem(title: "Trocar vendor", action: nil, keyEquivalent: "")
+    let vendorSubmenuItem = NSMenuItem(title: "Switch Vendor", action: nil, keyEquivalent: "")
     /// Overview-only: forces the status-bar title into the compact %-text mode
-    /// ("Compactar"); while compact it reads "Expandir" and turns it back off.
-    let compactItem = NSMenuItem(title: "Compactar", action: nil, keyEquivalent: "")
+    /// ("Compact"); while compact it reads "Expand" and turns it back off.
+    let compactItem = NSMenuItem(title: "Compact", action: nil, keyEquivalent: "")
     /// Which account each surface is signed in as. One dim line under the
     /// header, plus a submenu per surface. All three stay hidden until
     /// `account status --json` answers, so an older binary that doesn't know
@@ -1650,7 +2173,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         DEF.register(defaults: ["swapShortcutEnabled": true, "compactShortcutEnabled": true])
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "5h …"
+        // Every face is image-then-text (see setStatusFace); set the position
+        // once so later updates only swap the image and the title. The first
+        // paint is a bare ellipsis: nothing is known yet, and "5h" pre-announces
+        // a window this vendor may not even have.
+        statusItem.button?.imagePosition = .imageLeft
+        statusItem.button?.title = "…"
         buildMenu()
         rebuildVendorSubmenu()
         observeAppearanceChanges()
@@ -1755,7 +2283,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let enabled = DEF.bool(forKey: "swapShortcutEnabled")
-        // Mirror the swap shortcut as a hint on the "Trocar vendor" item. A native
+        // Mirror the swap shortcut as a hint on the "Switch Vendor" item. A native
         // keyEquivalent is suppressed by the submenu's disclosure arrow, so paint
         // the hint into the title instead (right-aligned, dimmed). Cleared when off.
         if enabled {
@@ -1765,18 +2293,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // menu whenever the wide overview rows are hidden.
             let font = NSFont.menuFont(ofSize: 0)
             let s = NSMutableAttributedString(
-                string: "Trocar vendor  ", attributes: [.font: font])
+                string: "Switch Vendor  ", attributes: [.font: font])
             s.append(NSAttributedString(string: "⌥⌘\\", attributes: [
                 .font: font, .foregroundColor: NSColor.tertiaryLabelColor,
             ]))
             vendorSubmenuItem.attributedTitle = s
         } else {
-            vendorSubmenuItem.attributedTitle = NSAttributedString(string: "Trocar vendor")
+            vendorSubmenuItem.attributedTitle = NSAttributedString(string: "Switch Vendor")
         }
         guard enabled else { return }
         guard installHotKeyHandlerOnce() else {
             disableFailedShortcut("swapShortcutEnabled", name: "⌥⌘\\")
-            vendorSubmenuItem.attributedTitle = NSAttributedString(string: "Trocar vendor")
+            vendorSubmenuItem.attributedTitle = NSAttributedString(string: "Switch Vendor")
             return
         }
         let id = EventHotKeyID(signature: OSType(0x4149_4242), id: SWAP_HOTKEY_ID)  // 'AIBB'
@@ -1787,13 +2315,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard hotKeyRegistrationSucceeded(status), let ref else {
             if let ref { UnregisterEventHotKey(ref) }
             disableFailedShortcut("swapShortcutEnabled", name: "⌥⌘\\", status: status)
-            vendorSubmenuItem.attributedTitle = NSAttributedString(string: "Trocar vendor")
+            vendorSubmenuItem.attributedTitle = NSAttributedString(string: "Switch Vendor")
             return
         }
         swapHotKeyRef = ref
     }
 
-    /// (Re)register the global ⌥⌘E Compactar/Expandir hot key to match the
+    /// (Re)register the global ⌥⌘E Compact/Expand hot key to match the
     /// `compactShortcutEnabled` preference. Idempotent, mirroring
     /// `installSwapHotKey` — including the painted-in hint (a native
     /// keyEquivalent would fire a second time while the menu is open, double-
@@ -1824,10 +2352,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         compactHotKeyRef = ref
     }
 
-    /// Compactar ↔ Expandir label plus the dimmed ⌥⌘E hint when the global
+    /// Compact ↔ Expand label plus the dimmed ⌥⌘E hint when the global
     /// shortcut is on. Shared by the overview render and the hot-key installer.
     func updateCompactItemTitle() {
-        let label = DEF.bool(forKey: "overviewCompact") ? "Expandir" : "Compactar"
+        let label = DEF.bool(forKey: "overviewCompact") ? "Expand" : "Compact"
         guard DEF.bool(forKey: "compactShortcutEnabled") else {
             compactItem.attributedTitle = NSAttributedString(string: label)
             return
@@ -1904,7 +2432,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// ⌥⌘E: toggle Compactar/Expandir. Overview-only — flipping a hidden
+    /// ⌥⌘E: toggle Compact/Expand. Overview-only — flipping a hidden
     /// preference from another view would be invisible and confusing.
     @objc func handleCompactHotKey() {
         guard VENDOR == "overview" else { return }
@@ -1949,19 +2477,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(compactItem)
 
         menu.addItem(.separator())
-        addAction(menu, "Atualizar agora", #selector(refreshAction), "r")
-        addAction(menu, "Abrir TUI", #selector(openTui), "t")
+        // The dropdown is a readout; the things that act live one level down.
+        // Nested submenus are fine in AppKit, and a key equivalent still fires
+        // from inside a submenu while the menu is open. autoenablesItems stays
+        // off so renderAccountMenus' isEnabled (switch in flight) is respected
+        // here exactly as it was at the top level.
+        let moreMenu = NSMenu()
+        moreMenu.autoenablesItems = false
+        addAction(moreMenu, "Refresh Now", #selector(refreshAction), "r")
+        addAction(moreMenu, "Open TUI", #selector(openTui), "t")
         vendorSubmenuItem.submenu = vendorSubmenu
-        menu.addItem(vendorSubmenuItem)
+        moreMenu.addItem(vendorSubmenuItem)
         for (item, submenu) in [(desktopAccountItem, desktopAccountSubmenu),
                                 (cliAccountItem, cliAccountSubmenu)] {
             item.submenu = submenu
             item.isHidden = true
-            menu.addItem(item)
+            moreMenu.addItem(item)
         }
-        addAction(menu, "Preferências…", #selector(openPrefs), ",")
+        let moreItem = NSMenuItem(title: "More", action: nil, keyEquivalent: "")
+        moreItem.submenu = moreMenu
+        menu.addItem(moreItem)
         menu.addItem(.separator())
-        addAction(menu, "Sair", #selector(quit), "q")
+        addAction(menu, "Preferences…", #selector(openPrefs), ",")
+        addAction(menu, "Quit", #selector(quit), "q")
 
         // Catches a switch made elsewhere (a terminal, claude-acc) without
         // polling for state that changes at most a few times a day.
@@ -1983,7 +2521,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func quit() { NSApp.terminate(nil) }
 
     /// Flip the overview's compact mode; the UserDefaults observer re-renders,
-    /// which also relabels the item (Compactar ↔ Expandir).
+    /// which also relabels the item (Compact ↔ Expand).
     @objc func toggleCompact() {
         DEF.set(!DEF.bool(forKey: "overviewCompact"), forKey: "overviewCompact")
     }
@@ -2001,7 +2539,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                              backing: .buffered,
                              defer: false)
             w.contentViewController = host
-            w.title = "AI Usage Bar — Preferências"
+            w.title = "AI Usage Bar — Preferences"
             // Resizable so the content can always be reached; a min size keeps
             // it usable, and the initial height is clamped to the visible screen
             // so the top never lands under the menu bar on short displays.
@@ -2065,8 +2603,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lastOverview = nil
         let appearance = statusItem.button?.effectiveAppearance ?? NSApp.effectiveAppearance
         let name = entryDisplayName(VENDOR)
-        statusItem.button?.attributedTitle = run("\(name) …", menuBarTextColor(appearance))
-        headerItem.attributedTitle = run("\(name) · carregando…", .labelColor,
+        setStatusFace([StatusEntry(pct: nil, text: "…")],
+                      textTitle: run("\(name) …", menuBarTextColor(appearance), statusFont))
+        headerItem.attributedTitle = run("\(name) · loading…", .labelColor,
                                          NSFont.boldSystemFont(ofSize: 13))
         for (_, it) in rows { it.isHidden = true }
         for it in overviewRows { it.isHidden = true }
@@ -2108,7 +2647,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func refresh() {
         guard let bin = resolveBinary("ai-usagebar") else {
-            setError("ai-usagebar não encontrado (PATH / ~/.cargo/bin / homebrew)")
+            setError("ai-usagebar not found (PATH / ~/.cargo/bin / homebrew)")
             return
         }
         // Coalesce: one subprocess at a time, and remember that another was
@@ -2153,7 +2692,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } catch {
                 watchdog.cancel()
                 DispatchQueue.main.async {
-                    self?.finishRefresh(generation) { $0.setError("falha ao executar ai-usagebar") }
+                    self?.finishRefresh(generation) { $0.setError("failed to run ai-usagebar") }
                 }
                 return
             }
@@ -2164,7 +2703,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     // Selection may have changed while this ran.
                     guard vendor == VENDOR else { return }
                     if timedOut {
-                        me.setError("ai-usagebar demorou demais (>\(Int(REFRESH_TIMEOUT))s)")
+                        me.setError("ai-usagebar took too long (>\(Int(REFRESH_TIMEOUT))s)")
                     } else {
                         me.consume(out)
                     }
@@ -2265,6 +2804,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// vendor when few; worst-first numbers (capped, with `+K` overflow) when
     /// many. Tunable via `[ui] overview_menubar_bars_max` (bar↔number threshold,
     /// default 4) and `overview_menubar_max` (how many numbers fit, default 4).
+    /// What the bar shows in overview mode: one dot-and-number pair per
+    /// provider the summary includes. Alphabetical by display name, so a
+    /// provider keeps its slot across refreshes instead of hopping when the
+    /// numbers move. Providers hidden from the summary are dropped, as are
+    /// balance-only ones (no percentage to grade) and any whose fetch came
+    /// back empty; the dropdown still lists all of them.
+    func overviewCompactEntries(_ items: [(name: String, id: String, snap: Snapshot?)]) -> [StatusEntry] {
+        let visible = Set(overviewVisibleIds(items.map { $0.id },
+                                             hidden: overviewHiddenProviders()))
+        return items
+            .filter { visible.contains($0.id) && $0.snap?.creditBalance == nil }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            .compactMap { item -> StatusEntry? in
+                guard let s = item.snap else { return nil }
+                let pct = overviewHeadline(s).pct
+                return StatusEntry(pct: pct, text: "\(pct)", vendorId: item.id)
+            }
+    }
+
     func overviewBarTitle(_ items: [(name: String, id: String, snap: Snapshot?)],
                           _ appearance: NSAppearance) -> NSAttributedString {
         let secondary = menuBarTextColor(appearance, secondary: true)
@@ -2275,26 +2833,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let heads: [(name: String, pct: Int, elapsed: Int?, value: String, reset: String?)] =
             items.compactMap {
                 guard visible.contains($0.id), let s = $0.snap else { return nil }
-                if let cb = s.creditBalance { return ($0.name, -1, nil, "cr \(cb)", nil) }
+                if let cb = s.creditBalance { return ($0.name, -1, nil, cb, nil) }
                 let h = overviewHeadline(s)
                 return ($0.name, h.pct, h.elapsed, "\(h.pct)%", h.reset.flatMap(shortReset))
             }
-        guard !heads.isEmpty else { return run("ovr", secondary) }
+        guard !heads.isEmpty else { return run("ovr", secondary, statusFont) }
 
         let barsMax = Int(configValueTOML("ui", "overview_menubar_bars_max") ?? "") ?? 4
         let compact = DEF.bool(forKey: "overviewCompact")
         let t = NSMutableAttributedString()
         if overviewUsesBars(count: heads.count, barsMax: barsMax, compact: compact) {
             for (i, e) in heads.enumerated() {
-                if i > 0 { t.append(run("   ", secondary)) }
-                t.append(run("\(ovLabel(e.name, 6)) ", secondary))
+                if i > 0 { t.append(run("   ", secondary, statusFont)) }
+                t.append(run("\(ovLabel(e.name, 6)) ", secondary, statusFont))
                 if e.pct >= 0 {
-                    t.append(run("\(e.pct)% ", colorForPct(e.pct)))
+                    t.append(run("\(e.pct)% ", colorForPct(e.pct), statusDigitFont))
                     t.append(progressAttr(pct: e.pct, width: BAR_WIDTH, elapsed: e.elapsed,
                                           appearance: appearance))
-                    if let r = e.reset { t.append(run(" \(r)", secondary)) }
+                    if let r = e.reset { t.append(run(" \(r)", secondary, statusDigitFont)) }
                 } else {
-                    t.append(run(e.value, .labelColor))  // credit balance
+                    t.append(run(e.value, .labelColor, statusDigitFont))  // credit balance
                 }
             }
         } else {
@@ -2304,14 +2862,85 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // stable positions beat a pct sort that reshuffles labels on every
             // refresh.
             for (i, e) in heads.prefix(maxN).enumerated() {
-                if i > 0 { t.append(run("  ", secondary)) }
-                t.append(run("\(ovLabel(e.name, 3)) ", secondary))
-                t.append(run(e.value, e.pct >= 0 ? colorForPct(e.pct) : .labelColor))
-                if let r = e.reset { t.append(run(" \(r)", secondary)) }
+                if i > 0 { t.append(run("  ", secondary, statusFont)) }
+                t.append(run("\(ovLabel(e.name, 3)) ", secondary, statusFont))
+                t.append(run(e.value, e.pct >= 0 ? colorForPct(e.pct) : .labelColor, statusDigitFont))
+                if let r = e.reset { t.append(run(" \(r)", secondary, statusDigitFont)) }
             }
-            if heads.count > maxN { t.append(run("  +\(heads.count - maxN)", secondary)) }
+            if heads.count > maxN { t.append(run("  +\(heads.count - maxN)", secondary, statusFont)) }
         }
         return t
+    }
+
+    /// One line under a provider header. Same shape the single-vendor menu
+    /// renders, so both surfaces name and align the same things. `pct == nil`
+    /// is a row with no gauge — a credit balance, or the em dash standing in
+    /// for a provider whose fetch came back empty.
+    struct OverviewDetail {
+        let label: String
+        let pct: Int?
+        var value: String = ""
+        var reset: String? = nil
+        var elapsed: Int? = nil
+        var dim: Bool = false
+    }
+
+    /// Every window a provider actually reports, in the single-vendor menu's
+    /// order. The headline (the worst of them) stays the menu bar's job; this
+    /// is the arithmetic behind it.
+    func overviewDetails(_ snap: Snapshot?) -> [OverviewDetail] {
+        guard let s = snap else { return [OverviewDetail(label: "—", pct: nil, dim: true)] }
+        var out: [OverviewDetail] = []
+        if let cb = s.creditBalance {
+            out.append(OverviewDetail(label: "Credits", pct: nil, value: cb))
+        } else {
+            if s.hasUsageWindows, let w = s.session {
+                out.append(OverviewDetail(label: s.sessionLabel, pct: w.pct,
+                                          value: "\(w.pct)%", reset: w.reset, elapsed: w.elapsed))
+            }
+            if s.hasUsageWindows, let w = s.weekly {
+                out.append(OverviewDetail(label: s.weeklyLabel, pct: w.pct,
+                                          value: "\(w.pct)%", reset: w.reset, elapsed: w.elapsed))
+            }
+        }
+        if let w = s.sonnet {
+            out.append(OverviewDetail(label: s.sonnetLabel, pct: w.pct,
+                                      value: "\(w.pct)%", reset: w.reset, elapsed: w.elapsed))
+        }
+        if let w = s.secondaryWeekly {
+            out.append(OverviewDetail(label: s.secondaryWeeklyLabel, pct: w.pct,
+                                      value: "\(w.pct)%", reset: w.reset, elapsed: w.elapsed))
+        } else if let e = s.extra {
+            out.append(OverviewDetail(label: "Extra usage", pct: e.pct,
+                                      value: "\(e.spent) / \(e.limit)"))
+        }
+        return out.isEmpty ? [OverviewDetail(label: "—", pct: nil, dim: true)] : out
+    }
+
+    /// A detail row on the single-vendor rows' tab stops: label, gauge, value,
+    /// reset. Rows with no gauge tab straight to the value column, the way the
+    /// Credits row does in single-vendor mode. `colW` is the label column every
+    /// row in this render shares, so the whole menu reads as one grid.
+    func overviewDetailTitle(_ d: OverviewDetail, _ colW: CGFloat,
+                             _ appearance: NSAppearance) -> NSAttributedString {
+        let a = NSMutableAttributedString()
+        a.append(run(fitMenuLabel(d.label), d.dim ? .secondaryLabelColor : .labelColor,
+                     menuLabelFont))
+        if let pct = d.pct {
+            a.append(run("\t", .labelColor, menuLabelFont))
+            a.append(progressAttr(pct: pct, width: MENU_BAR_W, elapsed: d.elapsed,
+                                  menu: true, appearance: appearance))
+            a.append(run("\t\(d.value)", colorForPct(pct), menuDigitFont))
+            if let r = d.reset, !r.isEmpty {
+                a.append(run("\t↺ \(r)", .secondaryLabelColor, menuDigitFont))
+            }
+        } else if !d.value.isEmpty {
+            a.append(run("\t\t\(d.value)", .labelColor, menuDigitFont))
+        }
+        a.addAttribute(.paragraphStyle,
+                       value: menuRowStyle(colW, wideValue: menuValueIsWide(d.value, d.reset)),
+                       range: NSRange(location: 0, length: a.length))
+        return a
     }
 
     func renderOverview(_ items: [(name: String, id: String, snap: Snapshot?)],
@@ -2319,71 +2948,65 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lastSnapshot = nil
         lastOverview = items
         let appearance = statusItem.button?.effectiveAppearance ?? NSApp.effectiveAppearance
-        headerItem.attributedTitle = run("Visão geral", .labelColor, NSFont.boldSystemFont(ofSize: 13))
+        headerItem.attributedTitle = run("Overview", .labelColor, NSFont.boldSystemFont(ofSize: 13))
         for key in ["session", "weekly", "sonnet", "extra"] { rows[key]?.isHidden = true }
-        ensureOverviewRowCapacity(items.count)
 
-        // Rows render in a monospaced font, so fixed character widths line the
-        // columns up. Pre-compute the widest headline pct and reset so both can be
-        // right-aligned — the reset then ends flush at the line's right edge.
-        let nameW = 14
-        var pctW = 0, resetW = 0
-        for item in items.prefix(overviewRows.count) {
-            guard let s = item.snap, s.creditBalance == nil else { continue }
-            let h = overviewHeadline(s)
-            pctW = max(pctW, h.value.count)
-            if let r = h.reset, !r.isEmpty { resetW = max(resetW, r.count) }
-        }
-        func rpad(_ s: String, _ w: Int) -> String {
-            String(repeating: " ", count: max(0, w - s.count)) + s
-        }
-
+        // One section per provider: a header carrying the name and the ✓, then
+        // its windows as indented detail rows. The pool is a flat list of menu
+        // items, so "sections" is only a matter of how many slots each provider
+        // claims — headers 1, plus one per detail row while it is shown.
         let hidden = overviewHiddenProviders()
-        for (i, item) in items.enumerated() where i < overviewRows.count {
-            let it = overviewRows[i]
-            it.isHidden = false
-            // Click a row to toggle whether this provider shows in the top-bar
-            // summary. Checkmark = shown; unchecked + dimmed = hidden from the
-            // bar (still listed here so it can be turned back on). Jump-to-vendor
-            // moved to the "Trocar vendor" submenu and ⌥⌘\.
+        let details = items.map { hidden.contains($0.id) ? [] : overviewDetails($0.snap) }
+        ensureOverviewRowCapacity(items.count + details.reduce(0) { $0 + $1.count })
+        // One label column for every provider's rows at once — measuring per
+        // section would give each provider its own grid and the menu would read
+        // as several ragged tables instead of one.
+        let colW = menuLabelColumn(details.flatMap { $0 }.map { $0.label })
+
+        var slot = 0
+        for (i, item) in items.enumerated() {
+            guard slot < overviewRows.count else { break }
+            // Click a header to toggle whether this provider shows in the top-bar
+            // summary. Checkmark = shown; unchecked = dimmed header with its
+            // detail collapsed, so the toggle declutters both surfaces at once.
+            // Jump-to-vendor lives in the "Switch Vendor" submenu and ⌥⌘\.
             let isHidden = hidden.contains(item.id)
-            it.state = isHidden ? .off : .on
-            it.representedObject = item.id
-            it.target = self
-            it.action = #selector(toggleOverviewProvider(_:))
-            let a = NSMutableAttributedString()
-            let fitted = item.name.count > nameW
-                ? String(item.name.prefix(nameW - 1)) + "…"
-                : item.name.padding(toLength: nameW, withPad: " ", startingAt: 0)
-            a.append(run(fitted + " ", .labelColor))
-            if let s = item.snap {
-                if let cb = s.creditBalance {
-                    a.append(run("cr \(cb)", .labelColor))
-                } else {
-                    let h = overviewHeadline(s)
-                    a.append(progressAttr(pct: h.pct, width: MENU_BAR_W, elapsed: h.elapsed,
-                                          menu: true, appearance: appearance))
-                    a.append(run("  \(rpad(h.value, pctW))", colorForPct(h.pct)))
-                    if let r = h.reset, !r.isEmpty {
-                        a.append(run("   ↺ \(rpad(r, resetW))", .secondaryLabelColor))
-                    }
-                }
-            } else {
-                a.append(run("—", .secondaryLabelColor))
+            let head = overviewRows[slot]; slot += 1
+            head.isHidden = false
+            head.indentationLevel = 0
+            head.isEnabled = true
+            head.state = isHidden ? .off : .on
+            head.representedObject = item.id
+            head.target = self
+            head.action = #selector(toggleOverviewProvider(_:))
+            let fitted = item.name.count > 28 ? String(item.name.prefix(28)) + "…" : item.name
+            head.attributedTitle = run(fitted, isHidden ? .tertiaryLabelColor : .labelColor,
+                                       menuLabelFont)
+            for d in details[i] {
+                guard slot < overviewRows.count else { break }
+                let it = overviewRows[slot]; slot += 1
+                it.isHidden = false
+                it.indentationLevel = 1     // native hierarchy; the stops still line up
+                it.state = .off
+                // A readout, not a control: disabled so it neither highlights nor
+                // dismisses the menu on a stray click. Attributed colors still draw.
+                it.isEnabled = false
+                it.target = nil
+                it.action = nil
+                it.representedObject = nil
+                it.attributedTitle = overviewDetailTitle(d, colW, appearance)
             }
-            // Grey the whole row while hidden, so "off" reads at a glance.
-            if isHidden {
-                a.addAttribute(.foregroundColor, value: NSColor.tertiaryLabelColor,
-                               range: NSRange(location: 0, length: a.length))
-            }
-            it.attributedTitle = a
         }
-        for i in items.count..<overviewRows.count { overviewRows[i].isHidden = true }
+        for i in slot..<overviewRows.count { overviewRows[i].isHidden = true }
 
         // Menu-bar title: every vendor at once (mini bars when few, numbers when
         // many). The dropdown always holds the full per-vendor list.
-        statusItem.button?.attributedTitle = overviewBarTitle(items, appearance)
-        compactItem.isHidden = false
+        setStatusFace(overviewCompactEntries(items),
+                      textTitle: overviewBarTitle(items, appearance))
+        // MENUBAR_MODE decides the bar's face now; overviewCompact only shapes
+        // the "text" readout, so the item has nothing to do in the other modes.
+        // ⌥⌘E still works everywhere for anyone who has learned it.
+        compactItem.isHidden = MENUBAR_MODE != "text"
         updateCompactItemTitle()
         if rebuildSubmenu { rebuildVendorSubmenu() }
     }
@@ -2406,18 +3029,45 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let data = output.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let text = obj["text"] as? String else {
-            setError("saída inválida")
+            setError("invalid output")
             return
         }
         guard let snap = parse(text, vendor: baseVendorId(VENDOR)) else {
             lastSnapshot = nil
             let appearance = statusItem.button?.effectiveAppearance ?? NSApp.effectiveAppearance
-            statusItem.button?.attributedTitle = run(stripMarkup(text), menuBarTextColor(appearance))  // Loading… / ⚠
+            let raw = stripMarkup(text)  // Loading… / ⚠
+            setStatusFace([StatusEntry(pct: nil, text: String(raw.prefix(12)))],
+                          textTitle: run(raw, menuBarTextColor(appearance), statusFont))
             return
         }
         lastSnapshot = snap
         renderPanel(snap)
         renderMenu(snap)
+    }
+
+    /// Paint the status item for the current menu-bar face — the one place any
+    /// of them is assembled, so a new caller only has to describe its state as
+    /// a list of providers.
+    ///   • "text": `textTitle` verbatim — the full labelled readout.
+    ///   • "icon": the dots alone, no numbers, so the bar keeps one glyph
+    ///     language whichever face is on.
+    ///   • "compact": a dot and its bare number per provider, pairs kept apart
+    ///     by a short rule.
+    /// Every face is text-side: several glyphs cannot ride a button's single
+    /// `image`, so they are attachments and the image stays nil.
+    func setStatusFace(_ entries: [StatusEntry], textTitle: NSAttributedString) {
+        guard let button = statusItem.button else { return }
+        button.image = nil
+        if MENUBAR_MODE == "text" {
+            button.attributedTitle = textTitle
+            return
+        }
+        // The layout itself lives in `statusFaceTitle`, outside the delegate,
+        // so the offscreen render harness can draw the real face instead of a
+        // copy that drifts from it.
+        button.attributedTitle = statusFaceTitle(entries, mode: MENUBAR_MODE,
+                                                 glyph: MENUBAR_GLYPH,
+                                                 appearance: button.effectiveAppearance)
     }
 
     func renderPanel(_ s: Snapshot) {
@@ -2426,15 +3076,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let primaryTextColor = menuBarTextColor(appearance)
         let secondaryTextColor = menuBarTextColor(appearance, secondary: true)
         func seg(_ tag: String, _ pct: Int, _ value: String, _ elapsed: Int?) {
-            if title.length > 0 { title.append(run("   ", secondaryTextColor)) }
-            title.append(run("\(tag) ", secondaryTextColor))
-            if SHOW_PERCENT { title.append(run(value + (SHOW_BARS ? " " : ""), colorForPct(pct))) }
+            if title.length > 0 { title.append(run("   ", secondaryTextColor, statusFont)) }
+            title.append(run("\(tag) ", secondaryTextColor, statusFont))
+            if SHOW_PERCENT { title.append(run(value + (SHOW_BARS ? " " : ""), colorForPct(pct), statusDigitFont)) }
             if SHOW_BARS { title.append(progressAttr(pct: pct, width: BAR_WIDTH, elapsed: elapsed, appearance: appearance)) }
-            if !SHOW_PERCENT && !SHOW_BARS { title.append(run(value, colorForPct(pct))) }
+            if !SHOW_PERCENT && !SHOW_BARS { title.append(run(value, colorForPct(pct), statusDigitFont)) }
         }
         if let creditBalance = s.creditBalance {
-            title.append(run("cr ", secondaryTextColor))
-            title.append(run(creditBalance, primaryTextColor))
+            title.append(run(creditBalance, primaryTextColor, statusDigitFont))
         } else if s.hasUsageWindows && SHOW_SESSION, let session = s.session {
             seg(s.sessionTag, session.pct, "\(session.pct)%", session.elapsed)
         }
@@ -2442,7 +3091,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             seg(s.weeklyTag, weekly.pct, "\(weekly.pct)%", weekly.elapsed)
         }
         if SHOW_EXTRA, let e = s.extra { seg("ex", e.pct, e.spent, nil) } // $ budget → no meta
-        statusItem.button?.attributedTitle = title.length > 0 ? title : run("ai", secondaryTextColor)
+        // The bar's number is the snapshot's headline — the worst of ALL its
+        // windows, the scoped model bar included — not merely the worst of the
+        // ones this text readout happens to draw. The dropdown lists that model
+        // row either way, so a bar reading lower than a row above it lies.
+        let headline = overviewHeadline(s)
+        setStatusFace(s.creditBalance.map { [StatusEntry(pct: nil, text: $0, vendorId: VENDOR)] }
+                        ?? [StatusEntry(pct: headline.pct, text: "\(headline.pct)",
+                                        vendorId: VENDOR)],
+                      textTitle: title.length > 0 ? title
+                                                  : run("ai", secondaryTextColor, statusFont))
     }
 
     func renderMenu(_ s: Snapshot) {
@@ -2455,22 +3113,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let header = accountLabel(of: VENDOR).map { "\(plan) · \($0)" } ?? plan
         headerItem.attributedTitle = run(header, .labelColor, NSFont.boldSystemFont(ofSize: 13))
 
+        let colW = menuLabelColumn(overviewDetails(s).map { $0.label })
+
         func row(_ key: String, _ name: String, _ pct: Int, _ value: String, _ reset: String?, _ elapsed: Int?) {
             guard let item = rows[key] else { return }
             item.isHidden = false
             let a = NSMutableAttributedString()
-            let label = name.count < 12
-                ? name.padding(toLength: 12, withPad: " ", startingAt: 0)
-                : name
-            a.append(run(label, .labelColor))
+            a.append(run("\(fitMenuLabel(name))\t", .labelColor, menuLabelFont))
             a.append(progressAttr(pct: pct, width: MENU_BAR_W, elapsed: elapsed, menu: true, appearance: appearance))
-            a.append(run("  \(value)", colorForPct(pct)))
-            if let r = reset, !r.isEmpty { a.append(run("   ↺ \(r)", .secondaryLabelColor)) }
+            a.append(run("\t\(value)", colorForPct(pct), menuDigitFont))
+            if let r = reset, !r.isEmpty { a.append(run("\t↺ \(r)", .secondaryLabelColor, menuDigitFont)) }
+            a.addAttribute(.paragraphStyle,
+                           value: menuRowStyle(colW, wideValue: menuValueIsWide(value, reset)),
+                           range: NSRange(location: 0, length: a.length))
             item.attributedTitle = a
         }
         if let creditBalance = s.creditBalance {
             rows["session"]?.isHidden = false
-            rows["session"]?.attributedTitle = run("Credits      \(creditBalance)", .labelColor)
+            let credits = NSMutableAttributedString()
+            credits.append(run("Credits\t\t", .labelColor, menuLabelFont))
+            credits.append(run(creditBalance, .labelColor, menuDigitFont))
+            credits.addAttribute(.paragraphStyle, value: menuRowStyle(colW, wideValue: true),
+                                 range: NSRange(location: 0, length: credits.length))
+            rows["session"]?.attributedTitle = credits
             rows["weekly"]?.isHidden = true
             rows["sonnet"]?.isHidden = true
         } else {
@@ -2502,7 +3167,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let entries = vendorEntries(active: active,
                                     usageAccounts: lastAccountStatus?.usageAccounts)
         if entries.isEmpty {
-            let none = NSMenuItem(title: "Nenhum configurado", action: nil, keyEquivalent: "")
+            let none = NSMenuItem(title: "None configured", action: nil, keyEquivalent: "")
             none.isEnabled = false
             vendorSubmenu.addItem(none)
             vendorSubmenuItem.isHidden = false
@@ -2517,7 +3182,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         // Synthetic overview target — same one the ⌥⌘\ ring ends on.
         vendorSubmenu.addItem(.separator())
-        let ov = NSMenuItem(title: "Visão geral", action: #selector(switchVendor(_:)), keyEquivalent: "")
+        let ov = NSMenuItem(title: "Overview", action: #selector(switchVendor(_:)), keyEquivalent: "")
         ov.target = self
         ov.representedObject = "overview"
         ov.state = (active == "overview") ? .on : .off
@@ -2584,7 +3249,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let line = accountsSummaryLine(status)
         accountsInfoItem.isHidden = line.isEmpty
-        accountsInfoItem.attributedTitle = run(line, .secondaryLabelColor)
+        accountsInfoItem.attributedTitle = run(line, .secondaryLabelColor, menuLabelFont)
 
         fill(desktopAccountSubmenu, status.desktopLabels, status.desktopActive,
              #selector(switchDesktopAccount(_:)))
@@ -2610,7 +3275,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             submenu.addItem(it)
         }
         submenu.addItem(.separator())
-        let add = NSMenuItem(title: "Adicionar conta…",
+        let add = NSMenuItem(title: "Add Account…",
                              action: #selector(addAccount(_:)), keyEquivalent: "")
         add.target = self
         add.representedObject = (submenu === desktopAccountSubmenu)
@@ -2625,18 +3290,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let desktop = sender.representedObject as? Bool,
               let bin = resolveBinary("ai-usagebar") else { return }
         let alert = NSAlert()
-        alert.messageText = desktop ? "Adicionar conta do Claude Desktop"
-                                    : "Adicionar conta do Claude Code"
+        alert.messageText = desktop ? "Add Claude Desktop account"
+                                    : "Add Claude Code account"
         alert.informativeText = desktop
-            ? "Escolha um nome. O app será fechado e reaberto na tela de login para você "
-                + "entrar com a conta nova; a atual é restaurada se você cancelar."
-            : "Escolha um nome. O `claude` abrirá no Terminal para você entrar; seu login "
-                + "padrão não é alterado."
+            ? "Pick a name. The app quits and reopens at the sign-in screen so you can "
+                + "sign in with the new account; the current one is restored if you cancel."
+            : "Pick a name. `claude` opens in Terminal for you to sign in; your current login "
+                + "is left unchanged."
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
-        field.placeholderString = "trabalho"
+        field.placeholderString = "work"
         alert.accessoryView = field
-        alert.addButton(withTitle: "Continuar")
-        alert.addButton(withTitle: "Cancelar")
+        alert.addButton(withTitle: "Continue")
+        alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
         alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -2651,11 +3316,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func switchDesktopAccount(_ sender: NSMenuItem) {
         guard let label = sender.representedObject as? String else { return }
         let alert = NSAlert()
-        alert.messageText = "Trocar a conta do Claude Desktop para «\(label)»?"
-        alert.informativeText = "O app será fechado e reaberto. Seu histórico local é "
-            + "mesclado nessa conta antes da troca, e uma cópia de segurança é gravada."
-        alert.addButton(withTitle: "Trocar e reiniciar")
-        alert.addButton(withTitle: "Cancelar")
+        alert.messageText = "Switch Claude Desktop account to “\(label)”?"
+        alert.informativeText = "The app quits and reopens. Your local history is "
+            + "merged into that account before switching, and a backup is written."
+        alert.addButton(withTitle: "Switch and restart")
+        alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         // Routines deleted in one account but alive in another would be handed
@@ -2673,13 +3338,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let alert = NSAlert()
         alert.messageText = conflicts.count == 1
-            ? "1 item foi apagado em uma conta e ainda existe em outra"
-            : "\(conflicts.count) itens foram apagados em uma conta e ainda existem em outra"
+            ? "1 item was deleted in one account and still exists in another"
+            : "\(conflicts.count) items were deleted in one account and still exist in another"
         alert.informativeText = conflictPreview(conflicts)
-            + "\n\nManter traz de volta os apagados. Apagar remove de todas as contas — uma conversa perde só o índice, a transcrição permanece."
-        alert.addButton(withTitle: "Manter todas")
-        alert.addButton(withTitle: "Apagar em todas")
-        alert.addButton(withTitle: "Escolher…")
+            + "\n\nKeep restores the deleted ones. Delete removes them from every account — a conversation loses only its index; the transcript stays."
+        alert.addButton(withTitle: "Keep All")
+        alert.addButton(withTitle: "Delete Everywhere")
+        alert.addButton(withTitle: "Choose…")
         NSApp.activate(ignoringOtherApps: true)
         switch alert.runModal() {
         case .alertFirstButtonReturn: return []
@@ -2711,11 +3376,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         scroll.documentView = list
 
         let alert = NSAlert()
-        alert.messageText = "O que manter?"
-        alert.informativeText = "Marcados continuam. Os desmarcados são apagados em todas as contas."
+        alert.messageText = "What to keep?"
+        alert.informativeText = "Checked items stay. Unchecked ones are deleted from every account."
         alert.accessoryView = scroll
-        alert.addButton(withTitle: "Confirmar")
-        alert.addButton(withTitle: "Cancelar")
+        alert.addButton(withTitle: "Confirm")
+        alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return nil }
         return zip(conflicts, boxes).filter { $0.1.state != .on }.map { $0.0.key }
@@ -2747,13 +3412,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     let detail = String(decoding: data, as: UTF8.self)
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     failure = detail.isEmpty
-                        ? "ai-usagebar terminou com status \(p.terminationStatus)."
+                        ? "ai-usagebar exited with status \(p.terminationStatus)."
                         : String(detail.prefix(2_000))
                 } else {
                     failure = nil
                 }
             } catch {
-                failure = "Não foi possível iniciar ai-usagebar: \(error.localizedDescription)"
+                failure = "Could not start ai-usagebar: \(error.localizedDescription)"
             }
             DispatchQueue.main.async {
                 guard let me = self else { return }
@@ -2762,7 +3427,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if let failure {
                     let alert = NSAlert()
                     alert.alertStyle = .warning
-                    alert.messageText = "Não foi possível trocar a conta"
+                    alert.messageText = "Could not switch account"
                     alert.informativeText = failure
                     alert.addButton(withTitle: "OK")
                     NSApp.activate(ignoringOtherApps: true)
@@ -2786,9 +3451,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func setError(_ msg: String) {
         lastSnapshot = nil
-        statusItem.button?.attributedTitle = run("⚠ ai", hexColor(COLOR_CRITICAL))
+        // One error face in every mode: the system's own warning symbol (a
+        // template, so it tints itself) and no text. The message is one click
+        // away in the dropdown header, where there is room to read it.
+        statusItem.button?.image = NSImage(systemSymbolName: "exclamationmark.triangle",
+                                           accessibilityDescription: "error")
+        statusItem.button?.attributedTitle = NSAttributedString(string: "")
         let appearance = statusItem.button?.effectiveAppearance ?? NSApp.effectiveAppearance
-        headerItem.attributedTitle = run(msg, menuBarTextColor(appearance))
+        headerItem.attributedTitle = run(msg, menuBarTextColor(appearance), menuLabelFont)
         for (_, it) in rows { it.isHidden = true }
         for it in overviewRows { it.isHidden = true }
         compactItem.isHidden = true

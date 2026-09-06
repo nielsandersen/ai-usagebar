@@ -460,7 +460,7 @@ func testClaudeAccounts() {
                 "OpenRouter account display name")
     assertEqual(vendorArgs(for: "zai").joined(separator: " "), "--vendor zai", "vendor fetch args")
     assertEqual(entryDisplayName("anthropic@gmail"), "Claude · gmail", "account display name")
-    assertEqual(entryDisplayName("overview"), "Visão geral", "overview display name")
+    assertEqual(entryDisplayName("overview"), "Overview", "overview display name")
 
     let overviewEntries = [
         MenuEntry(id: "anthropic@struct", name: "Claude · struct"),
@@ -489,11 +489,11 @@ func testClaudeAccounts() {
 }
 
 func testCompactToggle() {
-    // Under the threshold → bars, unless Compactar forces the text mode.
+    // Under the threshold → bars, unless Compact forces the text mode.
     assertEqual(overviewUsesBars(count: 3, barsMax: 4, compact: false), true,
                 "≤ barsMax without compact → bars")
     assertEqual(overviewUsesBars(count: 3, barsMax: 4, compact: true), false,
-                "Compactar forces %-text even under the threshold")
+                "Compact forces %-text even under the threshold")
     assertEqual(overviewUsesBars(count: 5, barsMax: 4, compact: false), false,
                 "past the threshold → %-text regardless")
     assertEqual(overviewUsesBars(count: 4, barsMax: 4, compact: false), true,
@@ -580,7 +580,7 @@ func testAccountStatus() {
     assertEqual(orphan?.cliLabels ?? [], ["work"], "an unmatched active still lists its accounts")
 
     // A Mac with the app installed but nothing captured yet: no summary line,
-    // but `desktopAvailable` keeps the submenu (and "Adicionar conta…") alive.
+    // but `desktopAvailable` keeps the submenu (and "Add Account…") alive.
     let fresh = parseAccountStatus(Data(#"{"desktop":{"available":true,"profiles":[]}}"#.utf8))
     assertEqual(fresh?.desktopAvailable, true, "an empty profile list is still available")
     assertEqual(accountsSummaryLine(fresh!), "", "nothing captured renders no line")
@@ -619,8 +619,8 @@ func testAccountStatus() {
     }
     assertEqual(conflictPreview(many).components(separatedBy: "\n").count, 11,
                 "preview caps at 10 plus a summary line")
-    assertEqual(conflictPreview(many).hasSuffix("… e mais 2"), true, "preview counts the rest")
-    assertEqual(conflictPreview(Array(many.prefix(3))).contains("e mais"), false,
+    assertEqual(conflictPreview(many).hasSuffix("… and 2 more"), true, "preview counts the rest")
+    assertEqual(conflictPreview(Array(many.prefix(3))).contains("… and "), false,
                 "a short list is not summarised")
 
     assertEqual(switchArgs(label: "work", desktop: true,
