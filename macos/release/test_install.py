@@ -62,8 +62,7 @@ class ActivationTests(unittest.TestCase):
             installer.activate(self.root, self.new, True)
         self.assertFalse(self.plist.exists())
         self.assertFalse(any(c[:2] == ['launchctl','enable'] for c in self.calls))
-        app.assert_called_once()
-        self.assertEqual(app.call_args.args[0], [str(self.root / 'current' / 'ai-usagebar-menubar')])
+        app.assert_not_called()
 
     def test_update_preserves_launchctl_disabled_login(self):
         def disabled(args, **kwargs):
@@ -74,7 +73,7 @@ class ActivationTests(unittest.TestCase):
             installer.activate(self.root, self.new, True)
         self.assertTrue(self.plist.exists())
         self.assertFalse(any(c[:2] == ['launchctl','enable'] for c in self.calls))
-        app.assert_called_once()
+        app.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()

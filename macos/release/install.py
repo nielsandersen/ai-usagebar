@@ -66,9 +66,8 @@ def activate(root, target, start):
             subprocess.run(['launchctl', 'enable', service], check=True)
             subprocess.run(['launchctl', 'bootstrap', f'gui/{os.getuid()}', str(plist)], check=True)
         else:
-            subprocess.Popen([str(current / 'ai-usagebar-menubar')],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, start_new_session=True)
+            print('Login launch remains disabled. Quit any running copy, then reopen:')
+            print(current / 'ai-usagebar-menubar')
     except Exception:
         subprocess.run(['launchctl', 'bootout', service], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if previous_link is not None:

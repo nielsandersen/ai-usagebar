@@ -20,7 +20,7 @@ Download the ARM64 release archive and its `.sha256` file from this fork’s Rel
 
 From a source checkout with GitHub CLI installed, `./macos/update-personal.sh` downloads and verifies the latest personal release. Pass a specific `macos-v...` tag to select a version. Do not use `cargo install ai-usagebar` to update this edition: it installs the upstream backend.
 
-Installations live in `~/.local/share/ai-usagebar/versions/<version>` with a `current` symlink. The installer selects that backend and TUI, preserves the remaining preferences, and starts the matching menu bar. Subsequent updates preserve your launch-at-login choice. `--no-start` only stages a verified package; it changes neither the active version nor login settings. Failed activation restores the prior link, backend preference, and LaunchAgent. Old source checkouts and binaries are not removed. Do not launch an old copy manually alongside the installed app.
+Installations live in `~/.local/share/ai-usagebar/versions/<version>` with a `current` symlink. The installer selects that backend and TUI, preserves the remaining preferences, and starts the matching menu bar. Subsequent updates preserve your launch-at-login choice. When login launch is disabled, quit any running copy and reopen the printed executable path after updating; the installer does not spawn an unmanaged duplicate. `--no-start` only stages a verified package; it changes neither the active version nor login settings. Failed activation restores the prior link, backend preference, and LaunchAgent. Old source checkouts and binaries are not removed. Do not launch an old copy manually alongside the installed app.
 
 To roll back after a subsequent personal update:
 
