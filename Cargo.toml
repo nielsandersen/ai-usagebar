@@ -1,13 +1,14 @@
 [package]
 name = "ai-usagebar"
-version = "1.4.0"
+version = "1.4.1-niels.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
+publish = false
 description = "Omarchy/Waybar widgets + TUI for tracking multi-provider AI plan usage"
 readme = "README.md"
-repository = "https://github.com/akitaonrails/ai-usagebar"
-homepage = "https://github.com/akitaonrails/ai-usagebar"
+repository = "https://github.com/nielsandersen/ai-usagebar"
+homepage = "https://github.com/nielsandersen/ai-usagebar"
 documentation = "https://github.com/akitaonrails/ai-usagebar#readme"
 keywords = ["waybar", "claude", "openai", "tui", "usage"]
 categories = ["command-line-utilities"]
@@ -78,9 +79,6 @@ rusqlite = { version = "0.40", default-features = false, features = ["bundled"] 
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-security-framework = "3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_Diagnostics_ToolHelp"] }

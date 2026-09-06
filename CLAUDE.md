@@ -1,3 +1,11 @@
+# Personal macOS fork
+
+This branch is Niels’ customized macOS edition. Preserve the existing Swift design and preferences. Read FORK.md before updating or releasing.
+
+For **personal macOS releases**, the fork-specific release process in FORK.md supersedes the upstream release checklist below: use `macos-v<version>` tags, the macOS release workflow, and never publish upstream AUR packages or crates.io artifacts. The inherited AUR metadata remains an upstream snapshot.
+
+Background monitoring must not rotate shared Claude Code Keychain credentials. Explicit account changes write through Apple’s security tool over stdin, with no credentials in argv. Do not restore native SecItemAdd/SecItemUpdate writes.
+
 # CLAUDE.md
 
 Notes for Claude Code (and humans) about working in this repo. Keep tight:
@@ -174,8 +182,7 @@ vendor's response shape drifts:
   auth file and pass the paths in; never touch the real ones.
 - `src/anthropic/keychain.rs` — macOS-only Keychain fallback when
   `~/.claude/.credentials.json` is absent (Claude Code on macOS stores
-  the OAuth blob in the login Keychain). Reads use `security(1)`; writes use
-  Security.framework so OAuth JSON never enters process arguments. Module-gated with
+  the OAuth blob in the login Keychain). Reads and writes use `security(1)`; writes use stdin so OAuth JSON never enters process arguments. Module-gated with
   `#[cfg(target_os = "macos")]`; Linux build never compiles it.
 - `src/cache.rs` — atomic per-vendor cache writes + flock, plus the shared
   cross-platform path resolvers (`xdg_cache_dir`, `home_dir`). `home_dir`

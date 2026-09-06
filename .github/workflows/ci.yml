@@ -4,7 +4,7 @@ name: CI
 # gate, macOS also compiles the native menu app, and Windows runs natively.
 on:
   push:
-    branches: [main]
+    branches: [main, codex/macos-personal]
   pull_request:
   workflow_dispatch:
 
@@ -81,6 +81,9 @@ jobs:
       # (arc geometry, TOML enabled parsing, vendor balance dispatch).
       - name: Build the menu bar app
         run: swiftc -O -parse-as-library -o /tmp/ai-usagebar-menubar macos/ai-usagebar-menubar.swift
+
+      - name: Test personal installer
+        run: python3 -m unittest discover -s macos/release -p 'test_*.py'
 
       - name: Run the menu bar test harness
         run: ./macos/run-tests.sh

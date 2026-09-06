@@ -833,9 +833,14 @@ func progressAttr(pct: Int, width: Int, elapsed: Int?, menu: Bool = false,
 
 func resolveBinary(_ name: String) -> String? {
     let fm = FileManager.default
-    if name == "ai-usagebar" {
+    if name == "ai-usagebar" || name == "ai-usagebar-tui" {
         let configured = DEF.string(forKey: "binaryPath") ?? ""
-        if !configured.isEmpty, fm.isExecutableFile(atPath: configured) { return configured }
+        if !configured.isEmpty {
+            let candidate = name == "ai-usagebar" ? configured
+                : URL(fileURLWithPath: configured).deletingLastPathComponent()
+                    .appendingPathComponent(name).path
+            if fm.isExecutableFile(atPath: candidate) { return candidate }
+        }
     }
     let home = NSHomeDirectory()
     for c in ["\(home)/.cargo/bin/\(name)", "/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)"]
@@ -1726,8 +1731,7 @@ func oauthScript(_ v: VendorAuth) -> String {
 }
 
 func openTuiInTerminal() {
-    let cargo = "\(NSHomeDirectory())/.cargo/bin/ai-usagebar-tui"
-    let tui = FileManager.default.isExecutableFile(atPath: cargo) ? cargo : "ai-usagebar-tui"
+    let tui = resolveBinary("ai-usagebar-tui") ?? "ai-usagebar-tui"
     runInTerminal("\"\(tui)\"\necho\nread -p \"Enter to close...\"")
 }
 
@@ -1843,7 +1847,6 @@ struct SettingsView: View {
     @AppStorage("colorHigh") private var colorHigh = "#d19a66"
     @AppStorage("colorCritical") private var colorCritical = "#e06c75"
     @AppStorage("colorEmpty") private var colorEmpty = "#3e4451"
-    @AppStorage("binaryPath") private var binaryPath = ""
     @State private var launchAtLogin = launchAgentIsInstalled()
     @State private var launchAtLoginError: String?
 
@@ -1878,8 +1881,6 @@ struct SettingsView: View {
                         Toggle("Show 5h bar (session)", isOn: $showSession)
                         Toggle("Show weekly bar", isOn: $showWeekly)
                         Toggle("Show extra-usage bar ($)", isOn: $showExtra)
-                        Toggle("Show percentage/value", isOn: $showPercent)
-                        Toggle("Show bars (off = numbers only)", isOn: $showBars)
                         Toggle("Show target line (pacing)", isOn: $showMeta)
                         Picker("Indicator style", selection: $barStyle) {
                             Text("Bars (░█)").tag("block")
@@ -1892,20 +1893,28 @@ struct SettingsView: View {
                         }
                         Picker("Provider marks", selection: $menuBarGlyph) {
                             Text("Dots").tag("dot")
-                            Text("Cuties").tag("mark")
+                            Text("Provider icons").tag("mark")
                         }
-                        Stepper("Bar width: \(barWidth)", value: $barWidth, in: 4...20)
+                        if menuBarMode == "text" {
+                            DisclosureGroup("Full-text options") {
+                                Toggle("Show percentage/value", isOn: $showPercent)
+                                Toggle("Show bars", isOn: $showBars)
+                                Stepper("Indicator width: \(barWidth)", value: $barWidth, in: 4...20)
+                            }
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 GroupBox("Shortcuts") {
                     VStack(alignment: .leading, spacing: 4) {
-                        Toggle("Switch vendor with ⌥⌘\\ (global shortcut)", isOn: $swapShortcutEnabled)
-                        Text("Switches the active vendor from any app.")
+                        Toggle("Switch provider with ⌥⌘\\ (global shortcut)", isOn: $swapShortcutEnabled)
+                        Text("Switches the active provider from any app.")
                             .font(.caption).foregroundColor(.secondary)
-                        Toggle("Collapse/expand with ⌥⌘E (global shortcut)", isOn: $compactShortcutEnabled)
-                        Text("Switches Overview between bars and compact mode.")
-                            .font(.caption).foregroundColor(.secondary)
+                        if menuBarMode == "text" {
+                            Toggle("Collapse/expand with ⌥⌘E", isOn: $compactShortcutEnabled)
+                            Text("Switches the full-text Overview between bars and numbers.")
+                                .font(.caption).foregroundColor(.secondary)
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -1915,17 +1924,18 @@ struct SettingsView: View {
                         HexColorPicker(title: "Medium (50–74%)", hex: $colorMid)
                         HexColorPicker(title: "High (75–89%)", hex: $colorHigh)
                         HexColorPicker(title: "Critical (≥90%)", hex: $colorCritical)
-                        HexColorPicker(title: "Empty (bar background)", hex: $colorEmpty)
+                        if barStyle == "block" {
+                            HexColorPicker(title: "Empty (bar background)", hex: $colorEmpty)
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 GroupBox("Data") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Picker("Vendor", selection: $vendor) {
+                        Picker("Provider", selection: $vendor) {
                             ForEach(vendors, id: \.self) { Text(entryDisplayName($0)).tag($0) }
                         }
                         Stepper("Interval: \(Int(interval))s", value: $interval, in: 5...3600, step: 5)
-                        TextField("Binary path (empty = auto)", text: $binaryPath)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -1943,10 +1953,10 @@ struct SettingsView: View {
                                     launchAtLoginError = error.localizedDescription
                                 }
                             }))
-                        Text("Installs a LaunchAgent that starts the app when you log in.")
+                        Text("Open AI Usage Bar automatically when you log in.")
                             .font(.caption).foregroundColor(.secondary)
                         if let error = launchAtLoginError {
-                            Text("Could not refresh: \(error)")
+                            Text("Could not save login setting: \(error)")
                                 .font(.caption).foregroundColor(.red)
                         }
                     }

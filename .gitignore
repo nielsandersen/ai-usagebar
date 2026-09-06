@@ -29,3 +29,8 @@ macos/ai-usagebar-menubar
 
 # Local screenshots for PR bodies (not tracked; drag into the PR on GitHub)
 macos/printscreen/
+
+# Personal release artifacts and local design backups
+/dist/
+macos/*.bak
+__pycache__/

@@ -1,3 +1,7 @@
+# AI Usage Bar — Niels’ macOS edition
+
+This fork preserves Niels’ custom menu bar design. Start with [FORK.md](FORK.md) for installation, updates, and the Mac authentication fix. Based on upstream v1.4.0; upstream documentation follows.
+
 # ai-usagebar
 
 Native Omarchy Quattro panel, Waybar widget, and tabbed TUI for AI plan usage across **Claude**, **Codex/ChatGPT**, **Z.AI (GLM)**, **OpenRouter**, **DeepSeek**, **Kimi**, **Nous Research**, **OpenCode Go**, and other supported AI coding services.

@@ -9,6 +9,27 @@ Each release is also published at
 
 ## [Unreleased]
 
+## [1.4.1-niels.1] — 2026-09-06
+
+### Added
+- Personal macOS distribution with versioned installations, rollback, and a dedicated GitHub fork.
+- Preserved custom provider marks, compact/icon/text menu modes, layout, typography, and English interface.
+
+### Changed
+- Simplified preferences: full-text controls appear only in full-text mode, block background color only for blocks, and installation paths are managed automatically.
+
+### Fixed
+- Background usage monitoring no longer rotates the Claude Code login stored in the Mac Keychain.
+- Explicit account writes use Apple’s security tool through stdin, retaining its access controls.
+- Unicode credential responses from security are decoded correctly.
+- Expired Claude sessions retain cached usage and explain how to refresh the login.
+- The TUI follows the configured backend installation.
+
+### Security
+- Oversized writes are rejected before execution; credentials never enter process arguments.
+- Credential writes have a 15-second deadline.
+
+
 ## [1.4.0] — 2026-08-21
 
 ### Added
@@ -1589,7 +1610,7 @@ vendors. Highlights:
 - Live API smoke test suite (`make smoke`) that exercises the real
   undocumented endpoints to detect schema drift before users do.
 
-[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/nielsandersen/ai-usagebar/compare/macos-v1.4.1-niels.1...codex/macos-personal
 [1.4.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.2.0...v1.3.0
@@ -1634,3 +1655,5 @@ vendors. Highlights:
 [0.3.0]: https://github.com/akitaonrails/ai-usagebar/releases/tag/v0.3.0
 [0.2.0]: https://github.com/akitaonrails/ai-usagebar/releases/tag/v0.2.0
 [0.1.0]: https://github.com/akitaonrails/ai-usagebar/releases/tag/v0.1.0
+
+[1.4.1-niels.1]: https://github.com/nielsandersen/ai-usagebar/releases/tag/macos-v1.4.1-niels.1

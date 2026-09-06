@@ -63,6 +63,20 @@ pub async fn fetch_snapshot(
     endpoints: &Endpoints,
     cache_ttl: Duration,
 ) -> Result<FetchOutcome> {
+    fetch_snapshot_with_resolver(client, creds_target, cache, endpoints, cache_ttl, || {
+        creds::resolve(creds_target)
+    })
+    .await
+}
+
+async fn fetch_snapshot_with_resolver(
+    client: &reqwest::Client,
+    creds_target: &creds::CredsTarget,
+    cache: &Cache,
+    endpoints: &Endpoints,
+    cache_ttl: Duration,
+    resolve: impl FnOnce() -> Result<(creds::CredentialsFile, creds::CredsSource)>,
+) -> Result<FetchOutcome> {
     cache.ensure_dir()?;
     let _lock = acquire_lock_async(&cache.lock_path(), LOCK_TIMEOUT).await?;
     // Desktop snapshots and account switching can mutate the same rotating
@@ -75,7 +89,7 @@ pub async fn fetch_snapshot(
     // plan label though, so read them either way. `resolve` also reports where
     // the creds actually came from (file vs macOS Keychain) so the refresh
     // write-back follows the same source instead of forking a stale copy.
-    let (mut creds, creds_source) = creds::resolve(creds_target)?;
+    let (mut creds, creds_source) = resolve()?;
     let plan_label = creds.claude_ai_oauth.plan_label();
 
     // Corrupt fresh cache falls through to a live fetch rather than returning
@@ -89,7 +103,14 @@ pub async fn fetch_snapshot(
     // Maybe refresh.
     let now = Utc::now().timestamp();
     let stale_token = oauth::needs_refresh(creds.claude_ai_oauth.expires_at_secs(), now);
-    let have_refresh = oauth::can_refresh(&creds.claude_ai_oauth.refresh_token);
+    // Claude Code owns these rotating credentials and does not participate
+    // in our cache lock. Background refresh can invalidate its session and
+    // native Keychain write-back can replace the item's access partition.
+    let shared_keychain = matches!(
+        creds_source,
+        creds::CredsSource::Keychain | creds::CredsSource::NamedKeychain(_)
+    );
+    let have_refresh = !shared_keychain && oauth::can_refresh(&creds.claude_ai_oauth.refresh_token);
     if stale_token && !have_refresh {
         // No refresh token to refresh with — the Claude Code client owns token
         // rotation (trusted-device flow) and leaves `refreshToken` empty. Don't
@@ -175,6 +196,11 @@ pub async fn fetch_snapshot(
             })
         }
         Ok(Err(AppError::Http { status, body })) => {
+            let body = if status == 401 && shared_keychain {
+                "Open Claude Code to refresh its login, then refresh usage. AI Usage Bar leaves this shared login unchanged.".into()
+            } else {
+                body
+            };
             cache.mark_stale();
             cache.write_last_error(status, &body);
             fallback_to_cache(cache, plan_label, Some((status, body)))
@@ -315,6 +341,65 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
+
+    // Regression: a background fetch must not rotate the credential shared
+    // with Claude Code, even when it carries an expired token + refresh token.
+    #[tokio::test]
+    async fn shared_keychain_login_is_read_only_during_usage_fetch() {
+        for status in [200, 401] {
+            for source in [
+                creds::CredsSource::Keychain,
+                creds::CredsSource::NamedKeychain("fixture-account".into()),
+            ] {
+                let mut server = mockito::Server::new_async().await;
+                let refresh = server
+                    .mock("POST", "/token")
+                    .expect(0)
+                    .with_status(400)
+                    .create_async()
+                    .await;
+                let usage = server
+                    .mock("GET", "/usage")
+                    .match_header("authorization", "Bearer AT")
+                    .with_status(status)
+                    .with_body(r#"{"five_hour":{"utilization":42},"seven_day":{"utilization":17}}"#)
+                    .create_async()
+                    .await;
+                let (_td, cache) = cache_fixture();
+                cache
+                    .write_payload(
+                        br#"{"five_hour":{"utilization":11},"seven_day":{"utilization":9}}"#,
+                    )
+                    .unwrap();
+                let file = expired_creds_no_refresh();
+                let mut credentials = creds::read_from(file.path()).unwrap();
+                credentials.claude_ai_oauth.refresh_token = "DO-NOT-ROTATE".into();
+                let outcome = fetch_snapshot_with_resolver(
+                    &reqwest::Client::new(),
+                    &creds::CredsTarget::Explicit(file.path().into()),
+                    &cache,
+                    &Endpoints {
+                        usage: format!("{}/usage", server.url()),
+                        token: format!("{}/token", server.url()),
+                    },
+                    Duration::ZERO,
+                    || Ok((credentials, source)),
+                )
+                .await
+                .unwrap();
+                refresh.assert_async().await;
+                usage.assert_async().await;
+                assert_eq!(
+                    outcome.snapshot.session.utilization_pct,
+                    if status == 200 { 42 } else { 11 }
+                );
+                assert_eq!(outcome.stale, status == 401);
+                if status == 401 {
+                    assert!(outcome.last_error.unwrap().1.contains("Open Claude Code"));
+                }
+            }
+        }
+    }
 
     fn future_creds() -> NamedTempFile {
         let mut f = NamedTempFile::new().unwrap();
