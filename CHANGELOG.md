@@ -9,6 +9,18 @@ Each release is also published at
 
 ## [Unreleased]
 
+## [1.4.1-niels.4] — 2026-09-06
+
+### Changed
+- Native macOS Settings toolbar with General, Appearance, and Providers panes, remembered selection, standard keyboard commands, and scrollable layouts.
+- Clearer provider status, optional-provider disclosure, consistent menu labels, and direct Refresh access.
+- Accessible text alternatives for icon-only usage and full labels for truncated menu rows.
+
+### Fixed
+- Connection notices no longer widen the numeric grid.
+- Provider setup can enable local and OAuth providers without editing API keys.
+- Checking setup again rechecks Claude login metadata instead of trusting a stale process cache.
+
 ## [1.4.1-niels.3] — 2026-09-06
 
 ### Fixed
@@ -1620,7 +1632,7 @@ vendors. Highlights:
 - Live API smoke test suite (`make smoke`) that exercises the real
   undocumented endpoints to detect schema drift before users do.
 
-[Unreleased]: https://github.com/nielsandersen/ai-usagebar/compare/macos-v1.4.1-niels.3...codex/macos-personal
+[Unreleased]: https://github.com/nielsandersen/ai-usagebar/compare/macos-v1.4.1-niels.4...codex/macos-personal
 [1.4.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.2.0...v1.3.0
@@ -1671,3 +1683,5 @@ vendors. Highlights:
 [1.4.1-niels.2]: https://github.com/nielsandersen/ai-usagebar/releases/tag/macos-v1.4.1-niels.2
 
 [1.4.1-niels.3]: https://github.com/nielsandersen/ai-usagebar/releases/tag/macos-v1.4.1-niels.3
+
+[1.4.1-niels.4]: https://github.com/nielsandersen/ai-usagebar/releases/tag/macos-v1.4.1-niels.4

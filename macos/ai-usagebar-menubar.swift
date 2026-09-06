@@ -2,15 +2,15 @@
 //
 // Shows ai-usagebar's 5-hour (session), weekly, and optional extra-usage
 // bars in the macOS menu bar, next to the clock, with a native dropdown and
-// a Preferences window (⌘,). Mirrors the GNOME Shell extension: same binary,
+// a Settings window (⌘,). Mirrors the GNOME Shell extension: same binary,
 // same One Dark colors and severity thresholds. Runs as a menu-bar agent.
 //
-// Settings persist in UserDefaults (edit them in Preferences, no rebuild).
+// Settings persist in UserDefaults (edit them in Settings, no rebuild).
 //
 // Build:  swiftc -O -parse-as-library ai-usagebar-menubar.swift -o ai-usagebar-menubar
 //         (needs the Xcode command-line tools: `xcode-select --install`)
 // Run:    ./ai-usagebar-menubar &      (or ./install-agent.sh for login start)
-// macOS:  12+ (Monterey) for the Preferences window; menu bar works on 10.15+.
+// macOS:  12+ (Monterey) for the Settings window; menu bar works on 10.15+.
 //
 // First, on the Mac: run `claude` once so the OAuth creds land in the login
 // Keychain — ai-usagebar reads them there (src/anthropic/keychain.rs).
@@ -19,7 +19,7 @@ import Cocoa
 import SwiftUI
 import Carbon.HIToolbox  // RegisterEventHotKey for the global vendor-swap shortcut
 
-// ─── Settings (persisted in UserDefaults; edit in Preferences) ───────────
+// ─── Settings (persisted in UserDefaults; edit in Settings) ───────────
 let DEF = UserDefaults.standard
 
 let SETTINGS_DEFAULTS: [String: Any] = [
@@ -410,6 +410,16 @@ struct StatusEntry {
     /// Empty where there is no provider to name — a loading placeholder, or
     /// output from the binary nothing could parse.
     var vendorId: String = ""
+}
+
+/// Text alternatives remain meaningful even when the visual face is icons only.
+func statusAccessibilityValue(_ entries: [StatusEntry]) -> String {
+    guard !entries.isEmpty else { return "Usage unavailable" }
+    return entries.map { entry in
+        let name = entry.vendorId.isEmpty ? "Usage" : entryDisplayName(entry.vendorId)
+        let value = entry.pct.map { "\($0) percent used" } ?? entry.text
+        return "\(name): \(value)"
+    }.joined(separator: "; ")
 }
 
 /// The status bar's calm tier, for a dot with no warning to give and for the
@@ -930,13 +940,13 @@ func providerNotice(_ output: [String: Any], vendor: String) -> String? {
         case "openai": return "Sign in again in Codex."
         case "cursor": return "Sign in again in Cursor."
         case "antigravity": return "Open Antigravity and check your sign-in."
-        default: return "Check your API key in Preferences."
+        default: return "Check your API key in Settings."
         }
     }
     if text.contains("Loading") || detail.contains("network") || detail.contains("connect") || detail.contains("timed out") {
         return "Can't connect. Check your connection; retrying."
     }
-    return stale ? "Showing saved usage. Retrying." : "Couldn't load usage. Check provider setup in Preferences."
+    return stale ? "Showing saved usage. Retrying." : "Couldn't load usage. Check provider setup in Settings."
 }
 
 func parse(_ text: String, vendor: String) -> Snapshot? {
@@ -1052,7 +1062,7 @@ func parse(_ text: String, vendor: String) -> Snapshot? {
                     cursorTotalPct: isCursor ? n(27) : nil)
 }
 
-// ─── Preferences UI (SwiftUI) ────────────────────────────────────────────
+// ─── Settings UI (SwiftUI) ────────────────────────────────────────────
 extension Color {
     init(hexString: String) { self.init(nsColor: hexColor(hexString)) }
     var hexString: String {
@@ -1663,11 +1673,15 @@ func vendorEnabled(_ v: VendorAuth) -> Bool {
 }
 
 // Cached: the check spawns a `security` subprocess, and it is consulted from the
-// menu-rebuild path (main thread). Signed-in state doesn't change within a run,
-// so compute it at most once — a restart picks up a fresh login.
-var keychainClaudeCache: Bool?
-func keychainHasClaude() -> Bool {
-    if let cached = keychainClaudeCache { return cached }
+// menu-rebuild path (main thread). Explicit Settings checks revalidate on a
+// background queue so returning from sign-in picks up the new login.
+private var keychainClaudeCache: Bool?
+private let keychainClaudeCacheLock = NSLock()
+func keychainHasClaude(refresh: Bool = false) -> Bool {
+    keychainClaudeCacheLock.lock()
+    let cached = keychainClaudeCache
+    keychainClaudeCacheLock.unlock()
+    if !refresh, let cached { return cached }
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
     p.arguments = ["find-generic-password", "-s", "Claude Code-credentials"]
@@ -1675,16 +1689,18 @@ func keychainHasClaude() -> Bool {
     p.standardError = FileHandle.nullDevice
     let result: Bool
     do { try p.run(); p.waitUntilExit(); result = p.terminationStatus == 0 } catch { result = false }
+    keychainClaudeCacheLock.lock()
     keychainClaudeCache = result
+    keychainClaudeCacheLock.unlock()
     return result
 }
 
-func vendorConfigured(_ v: VendorAuth) -> Bool {
+func vendorConfigured(_ v: VendorAuth, refreshLogin: Bool = false) -> Bool {
     guard vendorEnabled(v) else { return false }
     let home = NSHomeDirectory()
     let fm = FileManager.default
     if v.id == "anthropic" {
-        return fm.fileExists(atPath: "\(home)/.claude/.credentials.json") || keychainHasClaude()
+        return fm.fileExists(atPath: "\(home)/.claude/.credentials.json") || keychainHasClaude(refresh: refreshLogin)
     }
     if v.id == "openai" {
         return fm.fileExists(atPath: "\(home)/.codex/auth.json")
@@ -1775,40 +1791,96 @@ func openApp(_ name: String) {
     try? p.run()
 }
 
+/// Reuse the backend's validated, atomic TOML writer. No keys are read or sent.
+func enableProvider(_ id: String) -> Bool {
+    guard VENDOR_AUTH.contains(where: { $0.id == id }), let binary = resolveBinary("ai-usagebar"),
+          let data = try? JSONSerialization.data(withJSONObject: ["schema_version": 1, "enabled": [id: true]]) else { return false }
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: binary)
+    task.arguments = ["settings", "apply"]
+    let input = Pipe()
+    task.standardInput = input
+    task.standardOutput = FileHandle.nullDevice
+    task.standardError = FileHandle.nullDevice
+    do {
+        try task.run()
+        try input.fileHandleForWriting.write(contentsOf: data)
+        try input.fileHandleForWriting.close()
+        let deadline = Date(timeIntervalSinceNow: 10)
+        while task.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+        if task.isRunning { task.terminate(); return false }
+        return task.terminationStatus == 0
+    } catch {
+        if task.isRunning { task.terminate() }
+        return false
+    }
+}
+
 struct VendorsSection: View {
     @State private var configured: [String: Bool] = [:]
     @State private var cliPresent: [String: Bool] = [:]
     @State private var checking = false
+    @State private var setupError: String?
 
     var body: some View {
-        GroupBox("Vendors") {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(VENDOR_AUTH, id: \.id) { v in
-                    HStack(alignment: .firstTextBaseline) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(v.name)
-                            Text(statusText(v)).font(.caption).foregroundColor(.secondary)
-                        }
-                        Spacer()
-                        Button(buttonLabel(v)) { action(v) }
-                    }
-                }
-                if checking {
-                    Text("checking…").font(.caption).foregroundColor(.secondary)
-                }
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Connect the providers you use. Usage updates automatically after setup.")
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let error = setupError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            GroupBox("Your Providers") {
+                providerRows(VENDOR_AUTH.filter { vendorEnabled($0) })
+            }
+            DisclosureGroup("Other Providers") {
+                providerRows(VENDOR_AUTH.filter { !vendorEnabled($0) })
+                    .padding(.top, 8)
+            }
+            HStack {
+                Text("Setup opens in Terminal or the provider’s app.")
+                    .font(.callout).foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Button("Check Again", action: refresh).disabled(checking)
+            }
         }
         .onAppear(perform: refresh)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in refresh() }
+    }
+
+    private func providerRows(_ vendors: [VendorAuth]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if vendors.isEmpty {
+                Text("No providers enabled. Choose one below to get started.")
+                    .foregroundColor(.secondary).padding(8)
+            }
+            ForEach(Array(vendors.enumerated()), id: \.element.id) { index, v in
+                if index > 0 { Divider() }
+                HStack(alignment: .center, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(v.name).fontWeight(.medium)
+                        Text(statusText(v)).font(.callout).foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 8)
+                    Button(buttonLabel(v)) { action(v) }
+                        .accessibilityLabel("\(buttonLabel(v)) \(v.name)")
+                        .disabled(checking)
+                }.padding(.vertical, 12).padding(.horizontal, 8)
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func refresh() {
+        guard !checking else { return }
         checking = true
         DispatchQueue.global(qos: .userInitiated).async {
             var conf: [String: Bool] = [:]
             var cli: [String: Bool] = [:]
             for v in VENDOR_AUTH {
-                conf[v.id] = vendorConfigured(v)
+                conf[v.id] = vendorConfigured(v, refreshLogin: true)
                 // OAuth vendors need their CLI to log in; apikey vendors are
                 // configured via the TUI.
                 if v.kind == "oauth" { cli[v.id] = cliInstalled(v.cli) }
@@ -1822,35 +1894,46 @@ struct VendorsSection: View {
     }
 
     private func statusText(_ v: VendorAuth) -> String {
-        if configured[v.id] == true { return "✓ Configured" }
+        if !vendorEnabled(v) { return "Not enabled" }
+        if checking || configured[v.id] == nil { return "Checking setup…" }
+        if configured[v.id] == true {
+            return v.kind == "apikey" ? "API key saved" : "Login found"
+        }
         if v.kind == "oauth" {
-            if cliPresent[v.id] == false { return "⚠ \(v.cli) not installed" }
-            return "⚠ Not signed in — \(v.login)"
+            return cliPresent[v.id] == false ? "Install \(v.name) to connect" : "Sign-in needed"
         }
-        // Local vendors have no key: "configured" means signed in to the app
-        // AND the vendor's own section enabled in config.
-        if v.id == "antigravity" {
-            return "⚠ Open Antigravity (app, IDE, or agy) and enable [antigravity] in config"
-        }
-        if v.kind == "local" {
-            return "⚠ Sign in to the Cursor app and enable [cursor] in config"
-        }
-        return "⚠ No API key — \(apiKeyEnvironment(v))"
+        if v.kind == "local" { return "Open the app and sign in" }
+        return "API key needed"
     }
 
     private func buttonLabel(_ v: VendorAuth) -> String {
+        if !vendorEnabled(v) { return "Enable" }
         if v.kind == "oauth" {
-            if configured[v.id] == true { return "Sign In Again" }
-            if cliPresent[v.id] == false { return "Install + Sign In" }
-            return "Sign In"
+            if configured[v.id] == true { return "Sign In Again…" }
+            if cliPresent[v.id] == false { return "Set Up…" }
+            return "Sign In…"
         }
         if v.id == "antigravity" { return "Open Antigravity" }
         if v.kind == "local" { return "Open Cursor" }
-        return "Configure (TUI)"
+        return "Configure…"
+    }
+
+    private func enable(_ vendor: VendorAuth) {
+        checking = true
+        setupError = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let succeeded = enableProvider(vendor.id)
+            DispatchQueue.main.async {
+                checking = false
+                if !succeeded { setupError = "Could not enable \(vendor.name). Try again." }
+                refresh()
+            }
+        }
     }
 
     private func action(_ v: VendorAuth) {
-        if v.kind == "oauth" { runInTerminal(oauthScript(v)) }
+        if !vendorEnabled(v) { enable(v); return }
+        else if v.kind == "oauth" { runInTerminal(oauthScript(v)) }
         else if v.id == "antigravity" { openApp("Antigravity") }
         else if v.kind == "local" { openApp(v.name) }
         else { openTuiInTerminal() }
@@ -1859,6 +1942,10 @@ struct VendorsSection: View {
 }
 
 struct SettingsView: View {
+    let selectedTab: Int
+
+    init(selectedTab: Int = 0) { self.selectedTab = selectedTab }
+
     @AppStorage("vendor") private var vendor = "anthropic"
     @AppStorage("interval") private var interval = 30.0
     @AppStorage("barWidth") private var barWidth = 8
@@ -1885,7 +1972,7 @@ struct SettingsView: View {
     // (deepseek/kimi/kilo/novita/moonshot/grok/anthropic_api) as disabled when
     // their `[vendor].enabled` is omitted, and so must this picker. Claude
     // accounts appear as their `vendor@<label>` pseudo-ids, same as the
-    // "Switch Vendor" submenu.
+    // "Provider" submenu.
     private var vendors: [String] {
         var ids = VENDOR_AUTH.filter { vendorEnabled($0) }.map { $0.id }
         let labels = claudeAccountLabels()
@@ -1902,77 +1989,19 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        // A ScrollView (not a Form) so the pane reliably scrolls on every macOS
-        // version: on short displays the window can't grow past the screen, and
-        // a plain Form clipped its top rows with no way to reach them.
-        ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 18) {
-                GroupBox("Display") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Toggle("Show 5h bar (session)", isOn: $showSession)
-                        Toggle("Show weekly bar", isOn: $showWeekly)
-                        Toggle("Show extra-usage bar ($)", isOn: $showExtra)
-                        Toggle("Show target line (pacing)", isOn: $showMeta)
-                        Picker("Indicator style", selection: $barStyle) {
-                            Text("Bars (░█)").tag("block")
-                            Text("Ring (○)").tag("ring")
-                        }
-                        Picker("Menu bar", selection: $menuBarMode) {
-                            Text("Icon only").tag("icon")
-                            Text("Compact").tag("compact")
-                            Text("Full text").tag("text")
-                        }
-                        Picker("Provider marks", selection: $menuBarGlyph) {
-                            Text("Dots").tag("dot")
-                            Text("Provider icons").tag("mark")
-                        }
-                        if menuBarMode == "text" {
-                            DisclosureGroup("Full-text options") {
-                                Toggle("Show percentage/value", isOn: $showPercent)
-                                Toggle("Show bars", isOn: $showBars)
-                                Stepper("Indicator width: \(barWidth)", value: $barWidth, in: 4...20)
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                GroupBox("Shortcuts") {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle("Switch provider with ⌥⌘\\ (global shortcut)", isOn: $swapShortcutEnabled)
-                        Text("Switches the active provider from any app.")
-                            .font(.caption).foregroundColor(.secondary)
-                        if menuBarMode == "text" {
-                            Toggle("Collapse/expand with ⌥⌘E", isOn: $compactShortcutEnabled)
-                            Text("Switches the full-text Overview between bars and numbers.")
-                                .font(.caption).foregroundColor(.secondary)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                GroupBox("Colors") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HexColorPicker(title: "Low (<50%)", hex: $colorLow)
-                        HexColorPicker(title: "Medium (50–74%)", hex: $colorMid)
-                        HexColorPicker(title: "High (75–89%)", hex: $colorHigh)
-                        HexColorPicker(title: "Critical (≥90%)", hex: $colorCritical)
-                        if barStyle == "block" {
-                            HexColorPicker(title: "Empty (bar background)", hex: $colorEmpty)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                GroupBox("Data") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Picker("Provider", selection: $vendor) {
+        Group {
+            if selectedTab == 0 { settingsPane {
+                GroupBox("Usage") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Picker("Show", selection: $vendor) {
                             ForEach(vendors, id: \.self) { Text(entryDisplayName($0)).tag($0) }
                         }
-                        Stepper("Interval: \(Int(interval))s", value: $interval, in: 5...3600, step: 5)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                        Stepper("Refresh every \(Int(interval)) seconds", value: $interval, in: 5...3600, step: 5)
+                    }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
                 }
-                GroupBox("System") {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle("Start at login", isOn: Binding(
+                GroupBox("Startup") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Open at login", isOn: Binding(
                             get: { launchAtLogin },
                             set: { enabled in
                                 do {
@@ -1984,23 +2013,135 @@ struct SettingsView: View {
                                     launchAtLoginError = error.localizedDescription
                                 }
                             }))
-                        Text("Open AI Usage Bar automatically when you log in.")
-                            .font(.caption).foregroundColor(.secondary)
                         if let error = launchAtLoginError {
-                            Text("Could not save login setting: \(error)")
-                                .font(.caption).foregroundColor(.red)
+                            Label("Could not save login setting: \(error)", systemImage: "exclamationmark.triangle")
+                                .font(.callout).foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
                 }
+                GroupBox("Keyboard Shortcuts") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Toggle(isOn: $swapShortcutEnabled) {
+                            HStack {
+                                Text("Switch provider")
+                                Spacer()
+                                Text("⌥⌘\\").foregroundColor(.secondary)
+                            }
+                        }.accessibilityLabel("Switch provider with Option Command Backslash")
+                        Text("Works from any app.").font(.callout).foregroundColor(.secondary)
+                        if menuBarMode == "text" {
+                            Toggle(isOn: $compactShortcutEnabled) {
+                                HStack {
+                                    Text("Collapse overview")
+                                    Spacer()
+                                    Text("⌥⌘E").foregroundColor(.secondary)
+                                }
+                            }.accessibilityLabel("Collapse overview with Option Command E")
+                        }
+                    }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } } else if selectedTab == 1 { settingsPane {
+                GroupBox("Menu Bar") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Picker("Display", selection: $menuBarMode) {
+                            Text("Icons").tag("icon")
+                            Text("Compact").tag("compact")
+                            Text("Full Text").tag("text")
+                        }.pickerStyle(.segmented)
+                        if menuBarMode != "text" {
+                            Picker("Symbols", selection: $menuBarGlyph) {
+                                Text("Dots").tag("dot")
+                                Text("Provider Icons").tag("mark")
+                            }
+                        }
+                        if menuBarMode == "text" {
+                            Toggle("Show percentages and balances", isOn: $showPercent)
+                            Toggle("Show indicators", isOn: $showBars)
+                            if showBars {
+                                Stepper("Indicator width: \(barWidth)", value: $barWidth, in: 4...20)
+                            }
+                        }
+                    }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                }
+                GroupBox("Usage Indicators") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Picker("Style", selection: $barStyle) {
+                            Text("Bars").tag("block")
+                            Text("Rings").tag("ring")
+                        }
+                        Toggle("Show session usage", isOn: $showSession)
+                        Toggle("Show weekly usage", isOn: $showWeekly)
+                        Toggle("Show extra spending", isOn: $showExtra)
+                        Toggle("Show pacing marker", isOn: $showMeta)
+                        Text("Compare usage with the time elapsed in each limit window.")
+                            .font(.callout).foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                }
+                DisclosureGroup("Usage Colors") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HexColorPicker(title: "Below 50%", hex: $colorLow)
+                        HexColorPicker(title: "50–74%", hex: $colorMid)
+                        HexColorPicker(title: "75–89%", hex: $colorHigh)
+                        HexColorPicker(title: "90% and above", hex: $colorCritical)
+                        if barStyle == "block" {
+                            HexColorPicker(title: "Unused portion", hex: $colorEmpty)
+                        }
+                    }.padding(.top, 12)
+                }.padding(8)
+            } } else { settingsPane {
                 VendorsSection()
-            }
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            } }
         }
-        .frame(width: 460)
-        .frame(minHeight: 300, idealHeight: 560, maxHeight: .infinity)
+        .frame(minWidth: 480, idealWidth: 520, maxWidth: .infinity,
+               minHeight: 340, idealHeight: 560, maxHeight: .infinity)
         .onAppear { launchAtLogin = launchAgentIsInstalled() }
+    }
+
+    private func settingsPane<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 20, content: content)
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+}
+
+/// Native Settings toolbar: standard selection, keyboard navigation, and pane titles.
+final class SettingsPaneController: NSTabViewController {
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        let restoredPane = min(2, max(0, DEF.integer(forKey: "settingsPane")))
+        tabStyle = .toolbar
+        transitionOptions = []
+        for (index, pane) in [("General", "gearshape"), ("Appearance", "paintbrush"), ("Providers", "person.crop.circle")].enumerated() {
+            let host = NSHostingController(rootView: SettingsView(selectedTab: index))
+            let item = NSTabViewItem(viewController: host)
+            item.label = pane.0
+            item.image = NSImage(systemSymbolName: pane.1, accessibilityDescription: pane.0)
+            addTabViewItem(item)
+        }
+        selectedTabViewItemIndex = restoredPane
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        updatePaneTitle()
+        view.window?.toolbar?.allowsUserCustomization = false
+    }
+
+    override func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        super.tabView(tabView, didSelect: tabViewItem)
+        guard let item = tabViewItem, let index = tabViewItems.firstIndex(of: item) else { return }
+        DEF.set(index, forKey: "settingsPane")
+        updatePaneTitle()
+    }
+
+    private func updatePaneTitle() {
+        guard tabViewItems.indices.contains(selectedTabViewItemIndex) else { return }
+        view.window?.title = tabViewItems[selectedTabViewItemIndex].label
     }
 }
 
@@ -2009,7 +2150,7 @@ struct SettingsView: View {
 // The app is an unbundled single binary, so the modern SMAppService.mainApp
 // API (which needs a bundle id) doesn't apply. A per-user LaunchAgent is the
 // portable way to start an unbundled executable at login — the same mechanism
-// install-agent.sh sets up, now toggleable from Preferences.
+// install-agent.sh sets up, now toggleable from Settings.
 let LAUNCH_AGENT_LABEL = "com.akitaonrails.ai-usagebar-menubar"
 
 func launchAgentPlistPath() -> String {
@@ -2171,7 +2312,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Bumped on every refresh attempt. A result whose generation is no longer
     /// current belongs to a superseded attempt — most often the previously
     /// selected vendor — and must not be rendered. Without this, the timer,
-    /// the Preferences window and a vendor change could each start their own
+    /// the Settings window and a vendor change could each start their own
     /// subprocess and whichever finished last won, regardless of what the user
     /// had actually selected. Main-thread only.
     var refreshGeneration: Int = 0
@@ -2193,7 +2334,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // Rebuilt on every render so only configured vendors show, and the active
     // one is checked. Kept as a field so the menu owns it for its lifetime.
     let vendorSubmenu = NSMenu()
-    let vendorSubmenuItem = NSMenuItem(title: "Switch Vendor", action: nil, keyEquivalent: "")
+    let vendorSubmenuItem = NSMenuItem(title: "Provider", action: nil, keyEquivalent: "")
     /// Overview-only: forces the status-bar title into the compact %-text mode
     /// ("Compact"); while compact it reads "Expand" and turns it back off.
     let compactItem = NSMenuItem(title: "Compact", action: nil, keyEquivalent: "")
@@ -2326,7 +2467,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let enabled = DEF.bool(forKey: "swapShortcutEnabled")
-        // Mirror the swap shortcut as a hint on the "Switch Vendor" item. A native
+        // Mirror the swap shortcut as a hint on the "Provider" item. A native
         // keyEquivalent is suppressed by the submenu's disclosure arrow, so paint
         // the hint into the title instead (right-aligned, dimmed). Cleared when off.
         if enabled {
@@ -2342,12 +2483,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ]))
             vendorSubmenuItem.attributedTitle = s
         } else {
-            vendorSubmenuItem.attributedTitle = NSAttributedString(string: "Switch Vendor")
+            vendorSubmenuItem.attributedTitle = NSAttributedString(string: "Provider")
         }
         guard enabled else { return }
         guard installHotKeyHandlerOnce() else {
             disableFailedShortcut("swapShortcutEnabled", name: "⌥⌘\\")
-            vendorSubmenuItem.attributedTitle = NSAttributedString(string: "Switch Vendor")
+            vendorSubmenuItem.attributedTitle = NSAttributedString(string: "Provider")
             return
         }
         let id = EventHotKeyID(signature: OSType(0x4149_4242), id: SWAP_HOTKEY_ID)  // 'AIBB'
@@ -2358,7 +2499,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard hotKeyRegistrationSucceeded(status), let ref else {
             if let ref { UnregisterEventHotKey(ref) }
             disableFailedShortcut("swapShortcutEnabled", name: "⌥⌘\\", status: status)
-            vendorSubmenuItem.attributedTitle = NSAttributedString(string: "Switch Vendor")
+            vendorSubmenuItem.attributedTitle = NSAttributedString(string: "Provider")
             return
         }
         swapHotKeyRef = ref
@@ -2492,6 +2633,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func buildMenu() {
+        let applicationMenu = NSMenu()
+        let appMenu = NSMenu(title: "AI Usage Bar")
+        let appItem = NSMenuItem(); appItem.submenu = appMenu
+        applicationMenu.addItem(appItem)
+        addAction(appMenu, "Settings…", #selector(openPrefs), ",")
+        appMenu.addItem(.separator())
+        addAction(appMenu, "Quit AI Usage Bar", #selector(quit), "q")
+        let fileMenu = NSMenu(title: "File")
+        let fileItem = NSMenuItem(title: "File", action: nil, keyEquivalent: "")
+        fileItem.submenu = fileMenu
+        fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        applicationMenu.addItem(fileItem)
+        NSApp.mainMenu = applicationMenu
         let menu = NSMenu()
         menu.autoenablesItems = false
 
@@ -2530,8 +2684,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // here exactly as it was at the top level.
         let moreMenu = NSMenu()
         moreMenu.autoenablesItems = false
-        addAction(moreMenu, "Refresh Now", #selector(refreshAction), "r")
-        addAction(moreMenu, "Open TUI", #selector(openTui), "t")
+        addAction(menu, "Refresh Now", #selector(refreshAction), "r")
+        addAction(moreMenu, "Open in Terminal", #selector(openTui), "t")
         vendorSubmenuItem.submenu = vendorSubmenu
         moreMenu.addItem(vendorSubmenuItem)
         for (item, submenu) in [(desktopAccountItem, desktopAccountSubmenu),
@@ -2540,12 +2694,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.isHidden = true
             moreMenu.addItem(item)
         }
-        let moreItem = NSMenuItem(title: "More", action: nil, keyEquivalent: "")
+        let moreItem = NSMenuItem(title: "Actions", action: nil, keyEquivalent: "")
         moreItem.submenu = moreMenu
         menu.addItem(moreItem)
         menu.addItem(.separator())
-        addAction(menu, "Preferences…", #selector(openPrefs), ",")
-        addAction(menu, "Quit", #selector(quit), "q")
+        addAction(menu, "Settings…", #selector(openPrefs), ",")
+        addAction(menu, "Quit AI Usage Bar", #selector(quit), "q")
 
         // Catches a switch made elsewhere (a terminal, claude-acc) without
         // polling for state that changes at most a few times a day.
@@ -2574,22 +2728,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func openPrefs() {
         if prefsWindow == nil {
-            let host = NSHostingController(rootView: SettingsView())
+            let host = SettingsPaneController()
             // Install the host view directly so this window owns its size on
             // macOS 12 as well. The SwiftUI ScrollView still fills the
             // resizable content area without expanding it to its full height.
             let avail = NSScreen.main?.visibleFrame.height ?? 700
-            let initialSize = NSSize(width: 460, height: min(560, avail - 40))
+            let initialSize = NSSize(width: 520, height: min(560, avail - 40))
             let w = NSWindow(contentRect: NSRect(origin: .zero, size: initialSize),
                              styleMask: [.titled, .closable, .resizable],
                              backing: .buffered,
                              defer: false)
+            w.toolbarStyle = .preference
+            w.tabbingMode = .disallowed
             w.contentViewController = host
-            w.title = "AI Usage Bar — Preferences"
+            w.standardWindowButton(.zoomButton)?.isEnabled = false
+            w.title = "AI Usage Bar Settings"
+            w.setFrameAutosaveName("AIUsageBarSettings")
             // Resizable so the content can always be reached; a min size keeps
             // it usable, and the initial height is clamped to the visible screen
             // so the top never lands under the menu bar on short displays.
-            w.contentMinSize = NSSize(width: 460, height: 360)
+            w.contentMinSize = NSSize(width: 480, height: 360)
             w.setContentSize(initialSize)
             w.isReleasedWhenClosed = false
             w.center()
@@ -2607,7 +2765,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         try? p.run()
     }
 
-    // Settings changed in Preferences: re-render instantly from cache, re-arm
+    // Settings changed in Settings: re-render instantly from cache, re-arm
     // the timer, and re-fetch (debounced) in case vendor/binary changed.
     @objc func settingsChanged() {
         if overviewVisibilityChangePending {
@@ -3024,7 +3182,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // One label column for every provider's rows at once — measuring per
         // section would give each provider its own grid and the menu would read
         // as several ragged tables instead of one.
-        let colW = menuLabelColumn(details.flatMap { $0 }.map { $0.label })
+        let colW = menuLabelColumn(details.flatMap { $0 }.filter { !$0.notice }.map { $0.label })
 
         var slot = 0
         for (i, item) in items.enumerated() {
@@ -3032,7 +3190,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Click a header to toggle whether this provider shows in the top-bar
             // summary. Checkmark = shown; unchecked = dimmed header with its
             // detail collapsed, so the toggle declutters both surfaces at once.
-            // Jump-to-vendor lives in the "Switch Vendor" submenu and ⌥⌘\.
+            // Jump-to-vendor lives in the "Provider" submenu and ⌥⌘\.
             let isHidden = hidden.contains(item.id)
             let head = overviewRows[slot]; slot += 1
             head.isHidden = false
@@ -3043,7 +3201,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             head.target = self
             head.action = #selector(toggleOverviewProvider(_:))
             let fitted = item.name.count > 28 ? String(item.name.prefix(28)) + "…" : item.name
-            head.attributedTitle = run(fitted, isHidden ? .tertiaryLabelColor : .labelColor,
+            head.toolTip = "\(item.name) — click to \(isHidden ? "show" : "hide") in the menu bar"
+            head.setAccessibilityLabel(item.name)
+            head.attributedTitle = run(fitted, isHidden ? .secondaryLabelColor : .labelColor,
                                        menuLabelFont)
             for d in details[i] {
                 guard slot < overviewRows.count else { break }
@@ -3057,6 +3217,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 it.target = nil
                 it.action = nil
                 it.representedObject = nil
+                it.toolTip = d.label
+                it.setAccessibilityLabel([d.label, d.value, d.reset.map { "Resets in \($0)" } ?? ""].filter { !$0.isEmpty }.joined(separator: ", "))
                 it.attributedTitle = d.notice ? run(d.label, .secondaryLabelColor, menuLabelFont)
                     : overviewDetailTitle(d, colW, appearance)
             }
@@ -3098,7 +3260,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         providerNotices[VENDOR] = providerNotice(obj, vendor: VENDOR)
         guard let snap = parse(text, vendor: baseVendorId(VENDOR)) else {
-            setError(providerNotices[VENDOR] ?? "Couldn't load usage. Check provider setup in Preferences.")
+            setError(providerNotices[VENDOR] ?? "Couldn't load usage. Check provider setup in Settings.")
             return
         }
         lastSnapshot = snap
@@ -3119,6 +3281,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func setStatusFace(_ entries: [StatusEntry], textTitle: NSAttributedString) {
         guard let button = statusItem.button else { return }
         button.image = nil
+        button.setAccessibilityLabel("AI Usage Bar")
+        let notices = entries.compactMap { entry in
+            providerNotices[entry.vendorId].map { "\(entryDisplayName(entry.vendorId)): \($0)" }
+        }
+        button.setAccessibilityValue(([statusAccessibilityValue(entries)] + notices).joined(separator: "; "))
         if MENUBAR_MODE == "text" {
             button.attributedTitle = textTitle
             return
@@ -3191,6 +3358,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             a.addAttribute(.paragraphStyle,
                            value: menuRowStyle(colW, wideValue: menuValueIsWide(value, reset)),
                            range: NSRange(location: 0, length: a.length))
+            item.toolTip = name
+            item.setAccessibilityLabel([name, value, reset.map { "Resets in \($0)" } ?? ""].filter { !$0.isEmpty }.joined(separator: ", "))
             item.attributedTitle = a
         }
         if let creditBalance = s.creditBalance {
@@ -3517,6 +3686,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func setError(_ msg: String) {
         connectionNoticeItem.isHidden = true
         statusItem.button?.toolTip = msg
+        statusItem.button?.setAccessibilityLabel("AI Usage Bar")
+        statusItem.button?.setAccessibilityValue(msg)
         lastSnapshot = nil
         // One error face in every mode: the system's own warning symbol (a
         // template, so it tints itself) and no text. The message is one click

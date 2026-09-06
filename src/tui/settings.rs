@@ -271,6 +271,8 @@ pub struct SettingsState {
     pub primary: VendorId,
     /// One input per [`KEY_VENDORS`] entry, same order.
     pub keys: Vec<KeyInput>,
+    /// Explicit native-provider enable changes; credential fields remain untouched.
+    pub enabled_updates: BTreeMap<String, bool>,
     /// One-line status displayed in the footer ("saved …", "save failed …").
     pub status: String,
 }
@@ -296,6 +298,7 @@ impl SettingsState {
             primary_choices,
             primary,
             keys,
+            enabled_updates: BTreeMap::new(),
             status: String::new(),
         }
     }
@@ -483,6 +486,10 @@ pub fn save_to_path(state: &SettingsState, path: &Path) -> Result<()> {
         update_key(&mut doc, kv.section, input)?;
     }
 
+    for (id, enabled) in &state.enabled_updates {
+        set_bool(&mut doc, id, "enabled", *enabled)?;
+    }
+
     let bytes = doc.to_string();
     crate::cache::atomic_write(path, bytes.as_bytes())?;
 
@@ -605,6 +612,8 @@ struct ApplyRequest {
     primary: Option<String>,
     #[serde(default)]
     keys: BTreeMap<String, KeyMutation>,
+    #[serde(default)]
+    enabled: BTreeMap<String, bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -706,6 +715,15 @@ fn state_from_apply_request(cfg: &Config, raw: &str) -> Result<SettingsState> {
     }
 
     let mut state = SettingsState::from_config(cfg);
+    for (slug, enabled) in request.enabled {
+        let id = vendor_from_slug(&slug)
+            .ok_or_else(|| AppError::Other(format!("unknown vendor {slug:?}")))?;
+        state.primary_choices.retain(|choice| *choice != id);
+        if enabled {
+            state.primary_choices.push(id);
+        }
+        state.enabled_updates.insert(slug, enabled);
+    }
     if let Some(primary) = request.primary {
         let id = vendor_from_slug(&primary)
             .ok_or_else(|| AppError::Other(format!("unknown primary vendor {primary:?}")))?;
@@ -1017,12 +1035,41 @@ mod tests {
         KEY_VENDORS.iter().position(|kv| kv.id == id).unwrap()
     }
 
+    #[test]
+    fn native_settings_enable_local_provider_without_touching_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# keep this comment\n[openrouter]\napi_key = 'fake-key'\n[cursor]\nenabled = false\n",
+        )
+        .unwrap();
+        let cfg = Config::default();
+        apply_settings_json_to_path(
+            &cfg,
+            r#"{"schema_version":1,"enabled":{"cursor":true,"anthropic":true}}"#,
+            &path,
+        )
+        .unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("# keep this comment"));
+        let parsed: toml::Value = toml::from_str(&saved).unwrap();
+        assert_eq!(parsed["cursor"]["enabled"].as_bool(), Some(true));
+        assert_eq!(parsed["anthropic"]["enabled"].as_bool(), Some(true));
+        assert_eq!(parsed["openrouter"]["api_key"].as_str(), Some("fake-key"));
+        assert!(
+            state_from_apply_request(&cfg, r#"{"schema_version":1,"enabled":{"typo":true}}"#)
+                .is_err()
+        );
+    }
+
     fn blank_state(primary: VendorId) -> SettingsState {
         SettingsState {
             focus: Focus::Primary,
             primary_choices: VendorId::all().to_vec(),
             primary,
             keys: KEY_VENDORS.iter().map(|_| KeyInput::default()).collect(),
+            enabled_updates: BTreeMap::new(),
             status: String::new(),
         }
     }

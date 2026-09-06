@@ -683,7 +683,7 @@ func testProviderNotices() {
     assertEqual(providerNotice(["text": "42% ⏸", "tooltip": "HTTP 401 token expired"], vendor: "openai"),
                 "Sign in again in Codex.", "cached Codex data still shows login nudge")
     assertEqual(providerNotice(["text": "⚠", "tooltip": "missing OPENROUTER_API_KEY"], vendor: "openrouter"),
-                "Check your API key in Preferences.", "API providers give key setup nudge")
+                "Check your API key in Settings.", "API providers give key setup nudge")
     assertEqual(providerNotice(["text": "Loading…", "tooltip": "waiting for network"], vendor: "anthropic"),
                 "Can't connect. Check your connection; retrying.", "offline does not falsely demand new login")
     assertEqual(providerNotice(["text": "42% ⏸", "tooltip": "HTTP 429 rate limited"], vendor: "openrouter"),
@@ -692,9 +692,18 @@ func testProviderNotices() {
                 nil, "healthy provider clears notice")
 }
 
+func testStatusAccessibility() {
+    assertEqual(statusAccessibilityValue([]), "Usage unavailable", "empty icon readout has text alternative")
+    assertEqual(statusAccessibilityValue([StatusEntry(pct: 42, text: "42", vendorId: "openai")]),
+                "Codex: 42 percent used", "icon-only mode exposes provider and usage")
+    assertEqual(statusAccessibilityValue([StatusEntry(pct: nil, text: "$12.34", vendorId: "openrouter")]),
+                "OpenRouter: $12.34", "balance providers keep currency in text alternative")
+}
+
 @main
 struct TestRunner {
     static func main() {
+        testStatusAccessibility()
         testProviderNotices()
         testRingArc()
         testTomlParsing()
