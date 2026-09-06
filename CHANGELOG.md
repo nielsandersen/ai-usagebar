@@ -5,9 +5,14 @@ All notable changes to **ai-usagebar** are recorded here. The format is based on
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Each release is also published at
-<https://github.com/akitaonrails/ai-usagebar/releases>.
+<https://github.com/nielsandersen/ai-usagebar/releases>.
 
 ## [Unreleased]
+
+## [1.4.1-niels.3] — 2026-09-06
+
+### Fixed
+- Keep macOS keychain decoding compatible with current Rust lint checks and run those checks before release.
 
 ## [1.4.1-niels.2] — 2026-09-06
 
@@ -1615,7 +1620,7 @@ vendors. Highlights:
 - Live API smoke test suite (`make smoke`) that exercises the real
   undocumented endpoints to detect schema drift before users do.
 
-[Unreleased]: https://github.com/nielsandersen/ai-usagebar/compare/macos-v1.4.1-niels.2...codex/macos-personal
+[Unreleased]: https://github.com/nielsandersen/ai-usagebar/compare/macos-v1.4.1-niels.3...codex/macos-personal
 [1.4.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.2.0...v1.3.0
@@ -1664,3 +1669,5 @@ vendors. Highlights:
 [1.4.1-niels.1]: https://github.com/nielsandersen/ai-usagebar/releases/tag/macos-v1.4.1-niels.1
 
 [1.4.1-niels.2]: https://github.com/nielsandersen/ai-usagebar/releases/tag/macos-v1.4.1-niels.2
+
+[1.4.1-niels.3]: https://github.com/nielsandersen/ai-usagebar/releases/tag/macos-v1.4.1-niels.3
