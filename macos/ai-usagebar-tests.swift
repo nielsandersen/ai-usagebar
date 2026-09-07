@@ -774,6 +774,12 @@ func testHealthMenuIntegration() {
 @main
 struct TestRunner {
     static func main() {
+        #if WIDGET_HOST
+        let balance = Snapshot(plan: "", hasUsageWindows: false, creditBalance: "$12.34", session: Window(pct: 0, reset: "", elapsed: nil), weekly: nil, sonnet: nil, sonnetLabel: "", extra: nil)
+        assertEqual(widgetMetrics(for: balance).count, 0, "widget omits synthetic balance-only quota windows")
+        let spend = Snapshot(plan: "", hasUsageWindows: false, creditBalance: nil, session: nil, weekly: nil, sonnet: nil, sonnetLabel: "", extra: (pct: 72, spent: "$72", limit: "$100"))
+        assertEqual(widgetMetrics(for: spend).first?.percent, 72, "widget preserves API spend limit")
+        #endif
         testHealthMenuIntegration()
         testConnectionHealth()
         testStatusAccessibility()

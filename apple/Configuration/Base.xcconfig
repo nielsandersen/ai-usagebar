@@ -1,0 +1,4 @@
+USAGE_BUNDLE_PREFIX = com.nielsandersen.aiusagebar
+USAGE_APP_GROUP = group.com.nielsandersen.aiusagebar
+USAGE_CLOUD_CONTAINER = iCloud.com.nielsandersen.aiusagebar
+#include? "Local.xcconfig"
