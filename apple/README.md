@@ -17,6 +17,15 @@ data, never saved as real usage. Widgets themselves never substitute demo data.
 Widgets show last Mac update time; data/checks older than 30 minutes become stale.
 The OS controls actual refresh timing. Cached values do not imply a fresh login.
 
+## Usage colors
+
+Royal blue is the normal accent, with a lighter blue in dark appearance.
+At 75–89% usage, numbers and rings become amber; at 90% and above they turn red,
+matching the menu app's warning thresholds. Text and warning symbols distinguish
+“High usage”, “Near limit”, and “Limit reached” (100%), including in system-tinted
+widgets. These quota warnings do not imply a failed provider connection.
+The preview gallery includes normal, high, near-limit and at-limit examples.
+
 ## Build and test now
 
 Requires Xcode 26.2 (tested), Command Line Tools, and XcodeGen 2.45.4 (tested).

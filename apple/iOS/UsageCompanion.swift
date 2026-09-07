@@ -84,10 +84,11 @@ struct CompanionView: View {
     }
 }
 struct WidgetGallery: View {
+    @State private var previewPercent = 64
     private var example: UsageSnapshot {
         let now = Date()
         return UsageSnapshot(generatedAt: now, providers: [
-            ProviderUsage(id: "claude", name: "Claude", health: .healthy, checkedAt: now, usageAt: now, metrics: [UsageMetric(label: "Session", percent: 64), UsageMetric(label: "Weekly", percent: 38)], balance: nil),
+            ProviderUsage(id: "claude", name: "Claude", health: .healthy, checkedAt: now, usageAt: now, metrics: [UsageMetric(label: "Session", percent: previewPercent), UsageMetric(label: "Weekly", percent: 38)], balance: nil),
             ProviderUsage(id: "codex", name: "Codex", health: .healthy, checkedAt: now, usageAt: now, metrics: [UsageMetric(label: "Session", percent: 27)], balance: nil),
             ProviderUsage(id: "openrouter", name: "OpenRouter", health: .healthy, checkedAt: now, usageAt: now, metrics: [], balance: "$12.40 credit")
         ])
@@ -96,6 +97,12 @@ struct WidgetGallery: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 Text("Design previews · example data").font(.caption).foregroundStyle(.secondary)
+                Picker("Usage example", selection: $previewPercent) {
+                    Text("Normal").tag(64)
+                    Text("High").tag(82)
+                    Text("Near limit").tag(95)
+                    Text("At limit").tag(100)
+                }.pickerStyle(.segmented)
                 preview("Compact", family: .systemSmall, width: 166, height: 166)
                 preview("Donut", family: .systemMedium, width: 338, height: 158)
                 preview("Overview", family: .systemLarge, width: 338, height: 354)
