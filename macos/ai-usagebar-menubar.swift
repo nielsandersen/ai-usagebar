@@ -2477,6 +2477,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var accountSwitchInFlight = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        #if WIDGET_HOST
+        // Preserve the last known usage during startup or an offline restart.
+        // Current health stays "checking" until this process completes a check.
+        if let cached = WidgetStore().load() {
+            widgetProviders = Dictionary(uniqueKeysWithValues: cached.providers.map { ($0.id, $0) })
+        }
+        #endif
         let resources = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
             .resolvingSymlinksInPath().deletingLastPathComponent()
         if let icon = NSImage(contentsOf: Bundle.main.url(forResource: "AppIcon", withExtension: "icns") ?? resources.appendingPathComponent("AppIcon.icns")) {
