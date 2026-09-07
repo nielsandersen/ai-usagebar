@@ -1,0 +1,6 @@
+// Copy to Local.xcconfig after enrolling. Never commit signing credentials.
+DEVELOPMENT_TEAM = YOUR_TEAM_ID
+// Change these if you register different identifiers in your Apple account.
+USAGE_BUNDLE_PREFIX = com.nielsandersen.aiusagebar
+USAGE_APP_GROUP = group.com.nielsandersen.aiusagebar
+USAGE_CLOUD_CONTAINER = iCloud.com.nielsandersen.aiusagebar

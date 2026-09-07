@@ -37,3 +37,10 @@ __pycache__/
 
 # Icon copied next to the local development executable
 macos/AppIcon.icns
+
+# Apple widget local builds and signing settings
+apple/.build/
+apple/build/
+apple/Configuration/Local.xcconfig
+**/xcuserdata/
+apple/build-mac/

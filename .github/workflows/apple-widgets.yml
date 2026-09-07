@@ -1,0 +1,18 @@
+name: Apple widgets
+on:
+  push:
+    branches: [codex/apple-widgets]
+    paths: ['apple/**', 'macos/**', '.github/workflows/apple-widgets.yml']
+  pull_request:
+    paths: ['apple/**', 'macos/**', '.github/workflows/apple-widgets.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install project generator
+        run: command -v xcodegen || brew install xcodegen
+      - name: Build and test unsigned widget targets
+        run: ./apple/verify.sh

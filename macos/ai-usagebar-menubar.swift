@@ -20,7 +20,12 @@ import SwiftUI
 import Carbon.HIToolbox  // RegisterEventHotKey for the global vendor-swap shortcut
 
 // ─── Settings (persisted in UserDefaults; edit in Settings) ───────────
+#if WIDGET_HOST
+// Keep the personal menu app's existing settings when it gains a bundle ID.
+let DEF = UserDefaults(suiteName: "ai-usagebar-menubar")!
+#else
 let DEF = UserDefaults.standard
+#endif
 
 let SETTINGS_DEFAULTS: [String: Any] = [
     "vendor": "anthropic",
@@ -905,6 +910,22 @@ struct Snapshot {
     /// the single number its dashboard shows across both pools. nil for others.
     var cursorTotalPct: Int? = nil
 }
+
+#if WIDGET_HOST
+func widgetMetrics(for snapshot: Snapshot) -> [UsageMetric] {
+    let windows: [(String, Window?)] = snapshot.hasUsageWindows ? [
+        (snapshot.sessionLabel, snapshot.session), (snapshot.weeklyLabel, snapshot.weekly),
+        (snapshot.sonnetLabel, snapshot.sonnet), (snapshot.secondaryWeeklyLabel, snapshot.secondaryWeekly)] : []
+    var metrics = windows.compactMap { label, window -> UsageMetric? in
+        guard let window else { return nil }
+        return UsageMetric(label: String((label.isEmpty ? "Usage" : label).prefix(80)), percent: min(100, max(0, window.pct)))
+    }
+    if let extra = snapshot.extra {
+        metrics.append(UsageMetric(label: "Spending limit", percent: min(100, max(0, extra.pct))))
+    }
+    return metrics
+}
+#endif
 
 func stripMarkup(_ s: String) -> String {
     // Decode exactly one layer after removing tags. Rust escapes API-controlled
@@ -2377,6 +2398,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var compactHotKeyRef: EventHotKeyRef?
     var swapHotKeyHandlerInstalled = false
     var timer: Timer?
+    #if WIDGET_HOST
+    let widgetPublisher = WidgetPublisher()
+    var widgetProviders: [String: ProviderUsage] = [:]
+    let widgetSyncMenuItem = NSMenuItem(title: "Sync Widgets with iCloud", action: nil, keyEquivalent: "")
+    let widgetSyncStatusItem = NSMenuItem(title: "iCloud sync is off", action: nil, keyEquivalent: "")
+    #endif
     var prefsWindow: NSWindow?
     var appearanceObservation: NSKeyValueObservation?
     /// Last resolved light/dark name, so the appearance observer ignores the
@@ -2452,7 +2479,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let resources = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
             .resolvingSymlinksInPath().deletingLastPathComponent()
-        if let icon = NSImage(contentsOf: resources.appendingPathComponent("AppIcon.icns")) {
+        if let icon = NSImage(contentsOf: Bundle.main.url(forResource: "AppIcon", withExtension: "icns") ?? resources.appendingPathComponent("AppIcon.icns")) {
             NSApp.applicationIconImage = icon
         }
         DEF.register(defaults: ["swapShortcutEnabled": true, "compactShortcutEnabled": true])
@@ -2799,6 +2826,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.isHidden = true
             moreMenu.addItem(item)
         }
+        #if WIDGET_HOST
+        moreMenu.addItem(.separator())
+        widgetSyncMenuItem.target = self
+        widgetSyncMenuItem.action = #selector(toggleWidgetSync)
+        widgetSyncMenuItem.state = widgetPublisher.enabled ? .on : .off
+        widgetSyncMenuItem.toolTip = "Sync usage summaries to your private iCloud database. Provider credentials stay on this Mac."
+        moreMenu.addItem(widgetSyncMenuItem)
+        widgetSyncStatusItem.isEnabled = false
+        moreMenu.addItem(widgetSyncStatusItem)
+        #endif
         moreMenu.addItem(.separator())
         addAction(moreMenu, "About AI Usage Bar", #selector(openAbout), "")
         let moreItem = NSMenuItem(title: "Actions", action: nil, keyEquivalent: "")
@@ -2815,6 +2852,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func menuWillOpen(_ menu: NSMenu) {
+        #if WIDGET_HOST
+        widgetSyncStatusItem.title = widgetPublisher.message
+        #endif
         renderConnectionHealth()
         if Date().timeIntervalSince(accountStatusFetchedAt) >= 5 { fetchAccountStatus() }
     }
@@ -2833,6 +2873,45 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func toggleCompact() {
         DEF.set(!DEF.bool(forKey: "overviewCompact"), forKey: "overviewCompact")
     }
+
+    #if WIDGET_HOST
+    @objc func toggleWidgetSync() {
+        widgetPublisher.setEnabled(!widgetPublisher.enabled)
+        widgetSyncMenuItem.state = widgetPublisher.enabled ? .on : .off
+        widgetSyncStatusItem.title = widgetPublisher.message
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        if urls.contains(where: { $0.scheme == "aiusagebar" }) { openPrefs() }
+    }
+
+    func publishWidgetSnapshot() {
+        guard let entries = monitoredConnections else { return }
+        let ids = Set(entries.map { $0.id })
+        widgetProviders = widgetProviders.filter { ids.contains($0.key) }
+        let providers = entries.map { entry -> ProviderUsage in
+            let health = connectionHealth[entry.id]
+            let state = health.map { UsageHealth(rawValue: String(describing: $0.state)) ?? .unavailable } ?? .checking
+            var provider = widgetProviders[entry.id] ?? ProviderUsage(
+                id: String(entry.id.prefix(160)), name: String(entry.name.prefix(80)), health: state,
+                checkedAt: nil, usageAt: nil, metrics: [], balance: nil)
+            provider.health = state
+            provider.checkedAt = health?.checkedAt
+            return provider
+        }
+        widgetPublisher.update(UsageSnapshot(generatedAt: Date(), providers: providers))
+    }
+
+    func updateWidgetUsage(entry: MenuEntry, snapshot: Snapshot?, health: ConnectionHealth) {
+        if let snapshot, health.state == .healthy {
+            let metrics = widgetMetrics(for: snapshot)
+            widgetProviders[entry.id] = ProviderUsage(id: String(entry.id.prefix(160)), name: String(entry.name.prefix(80)),
+                health: .healthy, checkedAt: health.checkedAt, usageAt: health.checkedAt,
+                metrics: metrics, balance: snapshot.creditBalance.map { String($0.prefix(80)) })
+        }
+        publishWidgetSnapshot()
+    }
+    #endif
 
     @objc func openAbout() {
         let resources = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
@@ -2977,6 +3056,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         renderConnectionHealth()
         guard let bin = resolveBinary("ai-usagebar") else {
             for id in Array(connectionHealth.keys) { connectionHealth[id]?.state = .unavailable }
+            #if WIDGET_HOST
+            publishWidgetSnapshot()
+            #endif
             renderConnectionHealth()
             if connectionHealth.isEmpty {
                 healthItem.title = "Connection checks unavailable"
@@ -3050,6 +3132,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let ids = Set(entries.map { $0.id })
         connectionHealth = connectionHealth.filter { ids.contains($0.key) }
         providerNotices = providerNotices.filter { ids.contains($0.key) }
+        #if WIDGET_HOST
+        publishWidgetSnapshot()
+        #endif
         renderConnectionHealth()
         let sweep = entries.filter { $0.id == selectedVendor } + entries.filter { $0.id != selectedVendor }
         let requestedOverview = configuredOverviewVendorIds()
@@ -3087,6 +3172,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 DispatchQueue.main.async {
                     guard let me = self, me.refreshGeneration == generation else { return }
                     me.connectionHealth[entry.id] = health
+                    #if WIDGET_HOST
+                    me.updateWidgetUsage(entry: entry, snapshot: snap, health: health)
+                    #endif
                     me.providerNotices[entry.id] = notice
                     me.renderConnectionHealth()
                     if entry.id == selectedVendor, selectedVendor == VENDOR {
