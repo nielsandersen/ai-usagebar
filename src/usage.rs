@@ -80,7 +80,12 @@ impl Cents {
 pub struct AnthropicSnapshot {
     /// "Claude Pro", "Claude Max 5x", "Claude Max 20x", etc.
     pub plan: String,
-    pub session: UsageWindow,
+    /// The 5-hour window. `None` when the account has no such limit: since
+    /// 2026-10-30 the usage endpoint returns `five_hour: null` for verified
+    /// Ultra accounts, which only carry weekly caps. An absent window must
+    /// stay absent — a fabricated "Session 0%" read as a real, calm number
+    /// while the weekly window sat at 77%.
+    pub session: Option<UsageWindow>,
     pub weekly: UsageWindow,
     /// Some vendors of Claude (Pro, some Max tiers) don't have a separate
     /// Sonnet bucket — in which case this is None.
@@ -605,9 +610,11 @@ impl OpenRouterSnapshot {
 /// Worst-of severity class for the Waybar bar text color. Mirrors
 /// claudebar:606-620 — "extra usage only matters when a rate limit hits 100%".
 pub fn anthropic_severity(snap: &AnthropicSnapshot) -> crate::pacing::PaceSeverity {
-    let mut max = snap.session.utilization_pct;
-    if snap.weekly.utilization_pct > max {
-        max = snap.weekly.utilization_pct;
+    let mut max = snap.weekly.utilization_pct;
+    if let Some(s) = &snap.session
+        && s.utilization_pct > max
+    {
+        max = s.utilization_pct;
     }
     if let Some(s) = &snap.sonnet
         && s.utilization_pct > max
@@ -620,7 +627,10 @@ pub fn anthropic_severity(snap: &AnthropicSnapshot) -> crate::pacing::PaceSeveri
         }
     }
     // Extra usage only promotes severity if a rate-limit window is at 100%.
-    let any_at_cap = snap.session.utilization_pct >= 100
+    let any_at_cap = snap
+        .session
+        .as_ref()
+        .is_some_and(|s| s.utilization_pct >= 100)
         || snap.weekly.utilization_pct >= 100
         || snap
             .sonnet
@@ -653,7 +663,7 @@ mod tests {
     fn snap(s: i32, w_: i32, sonnet: Option<i32>, extra: Option<(i64, i64)>) -> AnthropicSnapshot {
         AnthropicSnapshot {
             plan: "Max 5x".into(),
-            session: w(s),
+            session: Some(w(s)),
             weekly: w(w_),
             sonnet: sonnet.map(w),
             scoped: vec![],
@@ -770,6 +780,18 @@ mod tests {
         // session = 100, weekly = 50, extra = 100% → max should be 100.
         let s = snap(100, 50, None, Some((10000, 10000)));
         assert_eq!(anthropic_severity(&s), PaceSeverity::Critical);
+    }
+
+    #[test]
+    fn severity_without_a_session_window_is_driven_by_the_rest() {
+        // Ultra after 2026-10-30: no 5-hour window at all. The weekly window
+        // alone must set the class, and a capped weekly still promotes extra.
+        let mut s = snap(0, 77, None, None);
+        s.session = None;
+        assert_eq!(anthropic_severity(&s), PaceSeverity::High);
+        let mut capped = snap(0, 100, None, Some((10000, 10000)));
+        capped.session = None;
+        assert_eq!(anthropic_severity(&capped), PaceSeverity::Critical);
     }
 
     fn with_scoped(mut s: AnthropicSnapshot, pct: i32) -> AnthropicSnapshot {

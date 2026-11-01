@@ -9,6 +9,19 @@ Each release is also published at
 
 ## [Unreleased]
 
+## [1.4.1-niels.7] — 2026-11-01
+
+### Fixed
+- **No more "Session 0%" on a plan without a 5-hour limit.** Since 2026-10-30
+  verified Ultra accounts (the renamed Max 20x) have only weekly limits, and the
+  usage endpoint returns `five_hour: null`. The backend turned that into a 0%
+  session window, so the menu bar led with a calm "0%" while the weekly window
+  sat at 77%. The session window is now optional end to end: the `{session_*}`
+  placeholders go empty (the menu bar already hides a row with no number), the
+  default bar text switches to `{weekly_pct}% · {weekly_reset}`, the tooltip and
+  TUI drop the Session block, and severity is the worst of the windows that
+  exist. Accounts that still have a 5-hour window are unchanged.
+
 ## [1.4.1-niels.6] — 2026-09-06
 
 ### Added

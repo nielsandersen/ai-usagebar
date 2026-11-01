@@ -235,7 +235,12 @@ impl UsageResponse {
             }
         }
 
-        let session = to_window(self.five_hour, SESSION);
+        // `five_hour: null` is a real state, not a gap to paper over: verified
+        // Ultra accounts have had no 5-hour limit since 2026-10-30 and the
+        // endpoint says so explicitly. Keep it absent so no surface draws a
+        // "Session 0%" the API never sent. The weekly window keeps its neutral
+        // fallback — every plan still has one.
+        let session = self.five_hour.map(|w| to_window(Some(w), SESSION));
         let weekly = to_window(self.seven_day, WEEKLY);
         let sonnet = self.seven_day_sonnet.map(|w| to_window(Some(w), WEEKLY));
         let extra = self.extra_usage.filter(|e| e.is_enabled).and_then(|e| {
@@ -301,13 +306,45 @@ mod tests {
         }"#;
         let resp: UsageResponse = serde_json::from_str(raw).unwrap();
         let snap = resp.into_snapshot("Max 5x".into());
-        assert_eq!(snap.session.utilization_pct, 43); // rounded
+        let session = snap.session.as_ref().unwrap();
+        assert_eq!(session.utilization_pct, 43); // rounded
         assert_eq!(snap.weekly.utilization_pct, 27);
         assert_eq!(snap.sonnet.as_ref().unwrap().utilization_pct, 4);
         let extra = snap.extra.as_ref().unwrap();
         assert_eq!(extra.limit, Some(Cents(5000)));
         assert_eq!(extra.spent.0, 250);
-        assert!(snap.session.resets_at.is_some());
+        assert!(session.resets_at.is_some());
+    }
+
+    #[test]
+    fn null_five_hour_yields_no_session_window() {
+        // Real shape observed 2026-11-01 on a verified Ultra account (identifiers
+        // removed): the 5-hour limit is gone, `five_hour` is an explicit null,
+        // and the weekly windows carry the account.
+        let raw = r#"{
+            "five_hour": null,
+            "seven_day": {"utilization": 77.0, "resets_at": "2026-11-02T06:59:59.916688+00:00"},
+            "seven_day_sonnet": null,
+            "extra_usage": {"is_enabled": false, "user_disabled": true},
+            "limits": [
+                {"kind": "weekly_all", "group": "weekly", "percent": 77,
+                 "severity": "warning", "resets_at": "2026-11-02T06:59:59.916688+00:00",
+                 "scope": null, "is_active": true},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 55,
+                 "severity": "normal", "resets_at": "2026-11-02T06:59:59.916833+00:00",
+                 "scope": {"model": {"id": null, "display_name": "Fable"}, "surface": null},
+                 "is_active": false}
+            ]
+        }"#;
+        let resp: UsageResponse = serde_json::from_str(raw).unwrap();
+        let snap = resp.into_snapshot("Ultra".into());
+        assert!(
+            snap.session.is_none(),
+            "no 5-hour limit must not become a 0% window"
+        );
+        assert_eq!(snap.weekly.utilization_pct, 77);
+        assert_eq!(snap.scoped[0].label, "Fable");
+        assert_eq!(snap.scoped[0].window.utilization_pct, 55);
     }
 
     #[test]
@@ -538,9 +575,9 @@ mod tests {
     fn empty_object_yields_neutral_snapshot() {
         let resp: UsageResponse = serde_json::from_str("{}").unwrap();
         let snap = resp.into_snapshot("Unknown".into());
-        assert_eq!(snap.session.utilization_pct, 0);
+        assert!(snap.session.is_none());
         assert_eq!(snap.weekly.utilization_pct, 0);
-        assert!(snap.session.resets_at.is_none());
+        assert!(snap.weekly.resets_at.is_none());
     }
 
     #[test]
@@ -553,7 +590,7 @@ mod tests {
         }"#;
         let resp: UsageResponse = serde_json::from_str(raw).unwrap();
         let snap = resp.into_snapshot("Pro".into());
-        assert_eq!(snap.session.utilization_pct, 100);
+        assert_eq!(snap.session.as_ref().unwrap().utilization_pct, 100);
         assert_eq!(snap.weekly.utilization_pct, 100); // rounds to 101, saturated
     }
 
@@ -624,7 +661,8 @@ mod tests {
         }"#;
         let resp: UsageResponse = serde_json::from_str(raw).unwrap();
         let snap = resp.into_snapshot("Pro".into());
-        assert!(snap.session.resets_at.is_none());
-        assert_eq!(snap.session.utilization_pct, 50);
+        let session = snap.session.as_ref().unwrap();
+        assert!(session.resets_at.is_none());
+        assert_eq!(session.utilization_pct, 50);
     }
 }

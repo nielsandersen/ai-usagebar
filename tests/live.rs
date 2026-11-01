@@ -119,7 +119,10 @@ async fn anthropic_live() {
     .expect("anthropic fetch should succeed against the real API");
 
     assert!(!out.snapshot.plan.is_empty(), "anthropic plan label empty");
-    assert_pct("anthropic.session", out.snapshot.session.utilization_pct);
+    // Absent on plans without a 5-hour limit (Ultra since 2026-10-30).
+    if let Some(session) = out.snapshot.session.as_ref() {
+        assert_pct("anthropic.session", session.utilization_pct);
+    }
     assert_pct("anthropic.weekly", out.snapshot.weekly.utilization_pct);
     if let Some(s) = out.snapshot.sonnet.as_ref() {
         assert_pct("anthropic.sonnet", s.utilization_pct);
@@ -132,9 +135,9 @@ async fn anthropic_live() {
         assert!(e.spent.0 >= 0, "anthropic extra.spent < 0");
     }
     println!(
-        "✅ anthropic — plan={}, session={}%, weekly={}%, sonnet={:?}, extra={:?}",
+        "✅ anthropic — plan={}, session={:?}, weekly={}%, sonnet={:?}, extra={:?}",
         out.snapshot.plan,
-        out.snapshot.session.utilization_pct,
+        out.snapshot.session.as_ref().map(|s| s.utilization_pct),
         out.snapshot.weekly.utilization_pct,
         out.snapshot.sonnet.as_ref().map(|s| s.utilization_pct),
         out.snapshot

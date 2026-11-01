@@ -320,8 +320,9 @@ async fn fetch_usage(client: &reqwest::Client, url: &str, creds: &OauthCreds) ->
     let bytes = crate::vendor::read_body_capped(resp, crate::vendor::MAX_BODY_BYTES).await?;
 
     if status.is_success() {
-        // Validate it's a usage shape — keep claudebar's "must have five_hour"
-        // sanity check (claudebar:385).
+        // Validate it's a usage shape. Unlike claudebar's "must have five_hour"
+        // check (claudebar:385), `five_hour` may be null: Ultra accounts have no
+        // 5-hour limit since 2026-10-30. Any parseable `UsageResponse` passes.
         let _: UsageResponse = serde_json::from_slice(&bytes)
             .map_err(|e| AppError::Schema(format!("usage response unparseable: {e}")))?;
         Ok(bytes.to_vec())
@@ -390,7 +391,7 @@ mod tests {
                 refresh.assert_async().await;
                 usage.assert_async().await;
                 assert_eq!(
-                    outcome.snapshot.session.utilization_pct,
+                    outcome.snapshot.session.as_ref().unwrap().utilization_pct,
                     if status == 200 { 42 } else { 11 }
                 );
                 assert_eq!(outcome.stale, status == 401);
@@ -500,7 +501,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(outcome.snapshot.session.utilization_pct, 42);
+        assert_eq!(
+            outcome.snapshot.session.as_ref().unwrap().utilization_pct,
+            42
+        );
         assert_ne!(outcome.snapshot.plan, "Unknown");
         assert!(!outcome.stale);
     }
@@ -530,7 +534,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(outcome.snapshot.session.utilization_pct, 42);
+        assert_eq!(
+            outcome.snapshot.session.as_ref().unwrap().utilization_pct,
+            42
+        );
         assert!(!outcome.stale);
     }
 
@@ -563,7 +570,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(outcome.snapshot.session.utilization_pct, 50);
+        assert_eq!(
+            outcome.snapshot.session.as_ref().unwrap().utilization_pct,
+            50
+        );
         assert!(!outcome.stale);
         m.assert_async().await;
         // Cache should now exist.
@@ -604,7 +614,10 @@ mod tests {
         .await
         .unwrap();
         assert!(outcome.stale);
-        assert_eq!(outcome.snapshot.session.utilization_pct, 12);
+        assert_eq!(
+            outcome.snapshot.session.as_ref().unwrap().utilization_pct,
+            12
+        );
         assert_eq!(outcome.last_error.as_ref().map(|(c, _)| *c), Some(429));
         assert_eq!(
             outcome.last_error.as_ref().map(|(_, m)| m.as_str()),
@@ -664,7 +677,10 @@ mod tests {
         .unwrap();
 
         assert!(!outcome.stale);
-        assert_eq!(outcome.snapshot.session.utilization_pct, 61);
+        assert_eq!(
+            outcome.snapshot.session.as_ref().unwrap().utilization_pct,
+            61
+        );
         assert!(
             outcome.last_error.is_none(),
             "empty-refresh path must not poison .last_error, got {:?}",
@@ -712,7 +728,10 @@ mod tests {
         .unwrap();
 
         assert!(outcome.stale);
-        assert_eq!(outcome.snapshot.session.utilization_pct, 17);
+        assert_eq!(
+            outcome.snapshot.session.as_ref().unwrap().utilization_pct,
+            17
+        );
         assert!(outcome.last_error.is_none());
         assert!(cache.read_last_error().is_none());
         refresh.assert_async().await;

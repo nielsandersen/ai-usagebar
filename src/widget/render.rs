@@ -20,6 +20,20 @@ use crate::waybar::{Class, WaybarOutput};
 
 /// Default format string when `--format` is omitted (claudebar:55).
 pub const DEFAULT_FORMAT: &str = "{session_pct}% · {session_reset}";
+/// Default for accounts with no 5-hour window (Ultra since 2026-10-30): the
+/// weekly window is then the one that gates the plan, so it is the headline.
+pub const WEEKLY_ONLY_FORMAT: &str = "{weekly_pct}% · {weekly_reset}";
+
+/// The format to use when `--format` is omitted: the session headline when
+/// the account reports a 5-hour window, else the weekly one. Mirrors the
+/// OpenAI vendor's weekly-only fallback.
+pub fn default_format(snap: &crate::usage::AnthropicSnapshot) -> &'static str {
+    if snap.session.is_some() {
+        DEFAULT_FORMAT
+    } else {
+        WEEKLY_ONLY_FORMAT
+    }
+}
 
 /// All inputs needed to render the widget — packaged so tests can construct
 /// it without any I/O.
@@ -98,13 +112,20 @@ fn build_placeholders(input: &RenderInput) -> HashMap<&'static str, String> {
     let snap = &input.outcome.snapshot;
     let theme = input.theme;
 
-    let session = pacing::calc(
-        snap.session.utilization_pct,
-        snap.session.resets_at,
-        input.now,
-        snap.session.window_duration,
-        input.pace_tolerance,
-    );
+    // No 5-hour window (Ultra): every `{session_*}` field is empty, the same
+    // signal the OpenAI vendor sends for an absent window. The desktop
+    // surfaces (macOS menu bar, GNOME) treat a non-numeric `{session_pct}` as
+    // "no row", so nothing draws a 0% bar for a limit that does not exist.
+    let session_window = snap.session.as_ref();
+    let session = session_window.map(|w| {
+        pacing::calc(
+            w.utilization_pct,
+            w.resets_at,
+            input.now,
+            w.window_duration,
+            input.pace_tolerance,
+        )
+    });
     let weekly = pacing::calc(
         snap.weekly.utilization_pct,
         snap.weekly.resets_at,
@@ -123,7 +144,8 @@ fn build_placeholders(input: &RenderInput) -> HashMap<&'static str, String> {
         )
     });
 
-    let session_color = pango::severity_color(severity_for(snap.session.utilization_pct), theme);
+    let session_color =
+        session_window.map(|w| pango::severity_color(severity_for(w.utilization_pct), theme));
     let weekly_color = pango::severity_color(severity_for(snap.weekly.utilization_pct), theme);
     let sonnet_color =
         sonnet_window.map(|w| pango::severity_color(severity_for(w.utilization_pct), theme));
@@ -132,7 +154,11 @@ fn build_placeholders(input: &RenderInput) -> HashMap<&'static str, String> {
         .as_ref()
         .map(|e| pango::severity_color(severity_for(e.percent()), theme));
 
-    let session_bar = pango::progress_bar(snap.session.utilization_pct, session_color, theme, None);
+    let session_bar = if let (Some(w), Some(c)) = (session_window, session_color) {
+        pango::progress_bar(w.utilization_pct, c, theme, None)
+    } else {
+        String::new()
+    };
     let weekly_bar = pango::progress_bar(snap.weekly.utilization_pct, weekly_color, theme, None);
     let sonnet_bar = if let (Some(w), Some(c)) = (sonnet_window, sonnet_color) {
         pango::progress_bar(w.utilization_pct, c, theme, None)
@@ -172,12 +198,25 @@ fn build_placeholders(input: &RenderInput) -> HashMap<&'static str, String> {
         ("icon", "󰚩".to_string()),
         ("vendor_short", "cld".to_string()),
         ("plan", snap.plan.clone()),
-        ("session_pct", snap.session.utilization_pct.to_string()),
+        (
+            "session_pct",
+            session_window
+                .map(|w| w.utilization_pct.to_string())
+                .unwrap_or_default(),
+        ),
         (
             "session_reset",
-            countdown::format(snap.session.resets_at, input.now),
+            session_window
+                .map(|w| countdown::format(w.resets_at, input.now))
+                .unwrap_or_default(),
         ),
-        ("session_elapsed", session.elapsed_pct.to_string()),
+        (
+            "session_elapsed",
+            session
+                .as_ref()
+                .map(|p| p.elapsed_pct.to_string())
+                .unwrap_or_default(),
+        ),
         ("session_bar", session_bar.clone()),
         ("weekly_pct", snap.weekly.utilization_pct.to_string()),
         (
@@ -258,7 +297,13 @@ fn build_placeholders(input: &RenderInput) -> HashMap<&'static str, String> {
         ("extra_bar", extra_bar),
     ]);
 
-    insert_pace(&mut v, "session", &session, input.format_pace_color, theme);
+    insert_pace(
+        &mut v,
+        "session",
+        session.as_ref().unwrap_or(&pacing::Pacing::neutral()),
+        input.format_pace_color,
+        theme,
+    );
     insert_pace(&mut v, "weekly", &weekly, input.format_pace_color, theme);
     if let Some(sp) = sonnet.as_ref() {
         insert_pace(&mut v, "sonnet", sp, input.format_pace_color, theme);
@@ -340,16 +385,8 @@ fn render_default_tooltip(input: &RenderInput) -> String {
     let dim = &theme.dim;
     let fg = &theme.fg;
 
-    let session_color = pango::severity_color(severity_for(snap.session.utilization_pct), theme);
     let weekly_color = pango::severity_color(severity_for(snap.weekly.utilization_pct), theme);
 
-    let session_pacing = pacing::calc(
-        snap.session.utilization_pct,
-        snap.session.resets_at,
-        input.now,
-        snap.session.window_duration,
-        input.pace_tolerance,
-    );
     let weekly_pacing = pacing::calc(
         snap.weekly.utilization_pct,
         snap.weekly.resets_at,
@@ -358,16 +395,6 @@ fn render_default_tooltip(input: &RenderInput) -> String {
         input.pace_tolerance,
     );
 
-    let session_bar = if input.tooltip_pace_pts {
-        pango::progress_bar(
-            snap.session.utilization_pct,
-            session_color,
-            theme,
-            Some(session_pacing.elapsed_pct),
-        )
-    } else {
-        pango::progress_bar(snap.session.utilization_pct, session_color, theme, None)
-    };
     let weekly_bar = if input.tooltip_pace_pts {
         pango::progress_bar(
             snap.weekly.utilization_pct,
@@ -379,7 +406,6 @@ fn render_default_tooltip(input: &RenderInput) -> String {
         pango::progress_bar(snap.weekly.utilization_pct, weekly_color, theme, None)
     };
 
-    let session_pace_glyph = pick_pace_glyph(input.tooltip_pace_pts, &session_pacing);
     let weekly_pace_glyph = pick_pace_glyph(input.tooltip_pace_pts, &weekly_pacing);
 
     let mut lines: Vec<Line> = Vec::new();
@@ -391,21 +417,43 @@ fn render_default_tooltip(input: &RenderInput) -> String {
     lines.push(Line::Sep);
     lines.push(Line::Body("".into()));
 
-    lines.push(Line::Body(format!(
-        " <span foreground='{fg}'>  󰔟  Session</span>"
-    )));
-    lines.push(Line::Body(format!(
-        "   {bar}  <span font_weight='bold' foreground='{color}'>{pct}% {glyph}</span>",
-        bar = session_bar,
-        color = session_color,
-        pct = snap.session.utilization_pct,
-        glyph = session_pace_glyph
-    )));
-    lines.push(Line::Body(format!(
-        " <span foreground='{dim}'>  ⏱  Resets in {cd}</span>",
-        cd = escape(&countdown::format(snap.session.resets_at, input.now))
-    )));
-    lines.push(Line::Body("".into()));
+    // The Session block exists only when the account has a 5-hour limit.
+    if let Some(session) = snap.session.as_ref() {
+        let session_color = pango::severity_color(severity_for(session.utilization_pct), theme);
+        let session_pacing = pacing::calc(
+            session.utilization_pct,
+            session.resets_at,
+            input.now,
+            session.window_duration,
+            input.pace_tolerance,
+        );
+        let session_bar = if input.tooltip_pace_pts {
+            pango::progress_bar(
+                session.utilization_pct,
+                session_color,
+                theme,
+                Some(session_pacing.elapsed_pct),
+            )
+        } else {
+            pango::progress_bar(session.utilization_pct, session_color, theme, None)
+        };
+        let session_pace_glyph = pick_pace_glyph(input.tooltip_pace_pts, &session_pacing);
+        lines.push(Line::Body(format!(
+            " <span foreground='{fg}'>  󰔟  Session</span>"
+        )));
+        lines.push(Line::Body(format!(
+            "   {bar}  <span font_weight='bold' foreground='{color}'>{pct}% {glyph}</span>",
+            bar = session_bar,
+            color = session_color,
+            pct = session.utilization_pct,
+            glyph = session_pace_glyph
+        )));
+        lines.push(Line::Body(format!(
+            " <span foreground='{dim}'>  ⏱  Resets in {cd}</span>",
+            cd = escape(&countdown::format(session.resets_at, input.now))
+        )));
+        lines.push(Line::Body("".into()));
+    }
 
     lines.push(Line::Body(format!(
         " <span foreground='{fg}'>  󰃰  Weekly</span>"
@@ -610,7 +658,7 @@ mod tests {
         };
         let snap = AnthropicSnapshot {
             plan: "Max 5x".into(),
-            session,
+            session: Some(session),
             weekly,
             sonnet: Some(sonnet),
             scoped: vec![],
@@ -705,6 +753,45 @@ mod tests {
         assert!(out.text.contains("62%"));
         assert!(out.text.contains("1h 30m"));
         assert_eq!(out.class, Class::Mid); // session=62 → mid
+    }
+
+    #[test]
+    fn no_session_window_leaves_every_session_field_empty_and_leads_with_weekly() {
+        // Ultra after 2026-10-30: `five_hour` is null. Nothing may paint a
+        // "Session 0%": the placeholders go empty (the desktop parsers read
+        // that as "no row"), the default bar text switches to the weekly
+        // window, and the tooltip has no Session block at all.
+        let mut oc = sample_outcome();
+        oc.snapshot.session = None;
+        oc.snapshot.weekly.utilization_pct = 77;
+        let theme = Theme::default();
+
+        let mut inp = input(&oc, &theme);
+        inp.format = default_format(&oc.snapshot);
+        let out = render_anthropic(&inp);
+        assert!(out.text.contains("77%"), "got: {}", out.text);
+        assert!(!out.text.contains("0%"), "got: {}", out.text);
+        assert_eq!(out.class, Class::High); // weekly=77 drives the class alone
+        assert!(!out.tooltip.contains("Session"), "tooltip: {}", out.tooltip);
+        assert!(out.tooltip.contains("Weekly"));
+
+        let mut inp2 = input(&oc, &theme);
+        inp2.tooltip_format = Some(
+            "[{session_pct}|{session_reset}|{session_elapsed}|{session_bar}|{session_pace}] W:{weekly_pct}",
+        );
+        let out2 = render_anthropic(&inp2);
+        // `{session_pace}` keeps the neutral "on track" glyph, the convention
+        // `{sonnet_pace}` already follows for an absent window.
+        assert_eq!(out2.tooltip, "[||||→] W:77");
+    }
+
+    #[test]
+    fn default_format_follows_the_windows_the_account_has() {
+        let oc = sample_outcome();
+        assert_eq!(default_format(&oc.snapshot), DEFAULT_FORMAT);
+        let mut weekly_only = sample_outcome();
+        weekly_only.snapshot.session = None;
+        assert_eq!(default_format(&weekly_only.snapshot), WEEKLY_ONLY_FORMAT);
     }
 
     #[test]

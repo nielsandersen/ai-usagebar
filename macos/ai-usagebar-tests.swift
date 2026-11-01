@@ -288,6 +288,18 @@ func testParserBalances() {
     assertNil(cld?.creditBalance, "anthropic has no balance")
     assertEqual(cld?.session?.pct, 42, "anthropic session pct")
 
+    // Ultra since 2026-10-30: the binary leaves every {session_*} field empty
+    // because the account has no 5-hour limit. That must read as "no session
+    // row", never as a 0% session, and the headline is then the weekly window.
+    let ultra = snapshot(FORMAT, vendor: "anthropic",
+                         fields: fields(through: 16, set: [
+                            3: "77", 4: "Mon", 16: "cld"
+                         ]))
+    assertEqual(ultra?.hasUsageWindows, true, "ultra still shows windows")
+    assertNil(ultra?.session, "ultra has no session row")
+    assertEqual(ultra?.weekly?.pct, 77, "ultra weekly pct")
+    assertEqual(AppDelegate().overviewHeadline(ultra!).pct, 77, "ultra headline = weekly")
+
     // Cursor: two included-usage pools carried on the session/weekly aliases
     // (session = Cursor Models, weekly = Other Models), both real, no balance.
     // The bars are relabeled away from the "Session"/"Weekly" time-window names.

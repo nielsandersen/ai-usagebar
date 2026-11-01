@@ -1,6 +1,7 @@
 // ai-usagebar-menubar — macOS menu bar app for ai-usagebar.
 //
-// Shows ai-usagebar's 5-hour (session), weekly, and optional extra-usage
+// Shows ai-usagebar's 5-hour (session, when the plan has one — Ultra does
+// not since 2026-10-30), weekly, and optional extra-usage
 // bars in the macOS menu bar, next to the clock, with a native dropdown and
 // a Settings window (⌘,). Mirrors the GNOME Shell extension: same binary,
 // same One Dark colors and severity thresholds. Runs as a menu-bar agent.
