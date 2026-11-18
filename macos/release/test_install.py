@@ -1,4 +1,5 @@
 import importlib.util
+import os
 from pathlib import Path
 import plistlib
 import subprocess
@@ -20,6 +21,12 @@ class ActivationTests(unittest.TestCase):
         self.new = self.root / 'versions' / 'new'
         self.old.mkdir(parents=True)
         self.new.mkdir()
+        self.apps = self.home / 'Applications'
+        self.app = self.apps / 'AI Usage Bar.app'
+        for version in (self.old, self.new):
+            (version / 'ai-usagebar-menubar').write_bytes(b'#!/bin/sh\n')
+            (version / 'AppIcon.icns').write_bytes(b'icon')
+            (version / 'VERSION').write_text(version.name + '\n')
         (self.root / 'current').symlink_to(self.old)
         self.plist = self.home / 'Library' / 'LaunchAgents' / f'{installer.LABEL}.plist'
         self.plist.parent.mkdir(parents=True)
@@ -43,23 +50,41 @@ class ActivationTests(unittest.TestCase):
             return self.command(args, **kwargs)
         with patch.object(Path, 'home', return_value=self.home), patch.object(installer.subprocess, 'run', side_effect=fail_new_defaults):
             with self.assertRaises(subprocess.CalledProcessError):
-                installer.activate(self.root, self.new, True)
+                installer.activate(self.root, self.new, True, self.apps)
         self.assertEqual((self.root / 'current').resolve(), self.old)
         self.assertEqual(self.plist.read_bytes(), self.old_plist)
+        self.assertFalse(self.app.exists())
         self.assertTrue(any(c[:2] == ['defaults','write'] and c[-1] == str(self.old / 'ai-usagebar') for c in self.calls))
         self.assertTrue(any(c[:2] == ['launchctl','bootstrap'] for c in self.calls))
 
     def test_no_start_does_not_change_active_installation_or_login(self):
         with patch.object(Path, 'home', return_value=self.home), patch.object(installer.subprocess, 'run', side_effect=self.command):
-            installer.activate(self.root, self.new, False)
+            installer.activate(self.root, self.new, False, self.apps)
         self.assertEqual((self.root / 'current').resolve(), self.old)
         self.assertEqual(self.plist.read_bytes(), self.old_plist)
         self.assertEqual(self.calls, [])
+        self.assertFalse(self.app.exists())
+
+    def test_install_builds_the_app_and_points_login_at_it(self):
+        with patch.object(Path, 'home', return_value=self.home), patch.object(installer.subprocess, 'run', side_effect=self.command):
+            installer.activate(self.root, self.new, True, self.apps)
+        executable = self.app / 'Contents' / 'MacOS' / 'ai-usagebar-menubar'
+        self.assertTrue(os.access(executable, os.X_OK))
+        self.assertTrue((self.app / 'Contents' / 'Resources' / 'AppIcon.icns').is_file())
+        info = plistlib.loads((self.app / 'Contents' / 'Info.plist').read_bytes())
+        self.assertEqual(info['CFBundleShortVersionString'], 'new')
+        self.assertEqual(info['CFBundleIdentifier'], installer.DOMAIN)
+        self.assertTrue(info['LSUIElement'])
+        agent = plistlib.loads(self.plist.read_bytes())
+        self.assertEqual(agent['ProgramArguments'], [str(executable)])
+        self.assertTrue(agent['KeepAlive'])
+        self.assertTrue(any(c[0] == 'codesign' for c in self.calls))
+        self.assertEqual([p.name for p in self.apps.iterdir()], ['AI Usage Bar.app'])
 
     def test_update_preserves_removed_login_agent(self):
         self.plist.unlink()
         with patch.object(Path, 'home', return_value=self.home), patch.object(installer.subprocess, 'run', side_effect=self.command), patch.object(installer.subprocess, 'Popen') as app:
-            installer.activate(self.root, self.new, True)
+            installer.activate(self.root, self.new, True, self.apps)
         self.assertFalse(self.plist.exists())
         self.assertFalse(any(c[:2] == ['launchctl','enable'] for c in self.calls))
         app.assert_not_called()
@@ -70,7 +95,7 @@ class ActivationTests(unittest.TestCase):
                 return subprocess.CompletedProcess(args, 0, '"' + installer.LABEL + '" => disabled')
             return self.command(args, **kwargs)
         with patch.object(Path, 'home', return_value=self.home), patch.object(installer.subprocess, 'run', side_effect=disabled), patch.object(installer.subprocess, 'Popen') as app:
-            installer.activate(self.root, self.new, True)
+            installer.activate(self.root, self.new, True, self.apps)
         self.assertTrue(self.plist.exists())
         self.assertFalse(any(c[:2] == ['launchctl','enable'] for c in self.calls))
         app.assert_not_called()

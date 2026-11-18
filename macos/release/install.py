@@ -9,13 +9,63 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 
 LABEL = 'com.akitaonrails.ai-usagebar-menubar'
 DOMAIN = 'ai-usagebar-menubar'
 BINARIES = ('ai-usagebar', 'ai-usagebar-tui', 'ai-usagebar-menubar')
 PACKAGE_FILES = (*BINARIES, 'AppIcon.icns', 'install.py', 'VERSION')
+APP_NAME = 'AI Usage Bar'
+# Same string as the bare binary's defaults domain, so the bundled app keeps
+# reading the settings (and binaryPath) the unbundled one wrote.
+BUNDLE_ID = DOMAIN
 
-def activate(root, target, start):
+def applications_dir():
+    system = Path('/Applications')
+    return system if os.access(system, os.W_OK) else Path.home() / 'Applications'
+
+def build_app(source, app):
+    """Assemble <app> from a verified version directory and swap it in."""
+    version = (source / 'VERSION').read_text().strip()
+    app.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix='.ai-usagebar-app-', dir=app.parent))
+    try:
+        bundle = stage / app.name
+        macos = bundle / 'Contents' / 'MacOS'
+        resources = bundle / 'Contents' / 'Resources'
+        macos.mkdir(parents=True)
+        resources.mkdir()
+        shutil.copy2(source / 'ai-usagebar-menubar', macos / 'ai-usagebar-menubar')
+        (macos / 'ai-usagebar-menubar').chmod(0o755)
+        shutil.copy2(source / 'AppIcon.icns', resources / 'AppIcon.icns')
+        info = {'CFBundleName': APP_NAME, 'CFBundleDisplayName': APP_NAME,
+                'CFBundleIdentifier': BUNDLE_ID, 'CFBundleExecutable': 'ai-usagebar-menubar',
+                'CFBundleIconFile': 'AppIcon', 'CFBundlePackageType': 'APPL',
+                'CFBundleInfoDictionaryVersion': '6.0',
+                'CFBundleShortVersionString': version, 'CFBundleVersion': version,
+                'LSUIElement': True, 'NSHighResolutionCapable': True,
+                'LSApplicationCategoryType': 'public.app-category.developer-tools'}
+        with open(bundle / 'Contents' / 'Info.plist', 'wb') as stream:
+            plistlib.dump(info, stream)
+        subprocess.run(['codesign', '--force', '--sign', '-', str(bundle)], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if app.exists():
+            app.rename(stage / 'old.app')
+        bundle.rename(app)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+def bootstrap(plist):
+    # launchd answers "Input/output error" (5) for a few seconds after a
+    # bootout of the same label, so give it time before calling it a failure.
+    command = ['launchctl', 'bootstrap', f'gui/{os.getuid()}', str(plist)]
+    for _ in range(9):
+        if subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+            return
+        time.sleep(2)
+    subprocess.run(command, check=True)
+
+def activate(root, target, start, apps=None):
     if not start:
         print(f'Staged {target.name}: {target}. Active version and login settings unchanged.')
         return
@@ -24,6 +74,9 @@ def activate(root, target, start):
         raise RuntimeError(f'Refusing to replace non-symlink {current}')
     previous_link = os.readlink(current) if current.is_symlink() else None
     previous = current.resolve() if current.exists() else None
+    app = (apps or applications_dir()) / f'{APP_NAME}.app'
+    had_app = app.exists()
+    executable = app / 'Contents' / 'MacOS' / 'ai-usagebar-menubar'
     plist = Path.home() / 'Library' / 'LaunchAgents' / f'{LABEL}.plist'
     old_plist = plist.read_bytes() if plist.exists() else None
     service = f'gui/{os.getuid()}/{LABEL}'
@@ -54,27 +107,33 @@ def activate(root, target, start):
     try:
         subprocess.run(['launchctl', 'bootout', service], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         replace_link(target)
+        build_app(target, app)
         subprocess.run(['defaults', 'write', DOMAIN, 'binaryPath', '-string', str(current / 'ai-usagebar')], check=True)
         if old_plist is not None or login_enabled:
             plist.parent.mkdir(parents=True, exist_ok=True)
-            data = {'Label': LABEL, 'ProgramArguments': [str(current / 'ai-usagebar-menubar')],
-                    'RunAtLoad': True, 'KeepAlive': True, 'ProcessType': 'Interactive'}
+            data = {'Label': LABEL, 'ProgramArguments': [str(executable)],
+                    'RunAtLoad': True, 'KeepAlive': True, 'ProcessType': 'Interactive',
+                    'AssociatedBundleIdentifiers': [BUNDLE_ID]}
             fd, tmp = tempfile.mkstemp(prefix='.ai-usagebar-', dir=plist.parent)
             with os.fdopen(fd, 'wb') as stream:
                 plistlib.dump(data, stream)
             os.replace(tmp, plist)
         if login_enabled:
             subprocess.run(['launchctl', 'enable', service], check=True)
-            subprocess.run(['launchctl', 'bootstrap', f'gui/{os.getuid()}', str(plist)], check=True)
+            bootstrap(plist)
         else:
             print('Login launch remains disabled. Quit any running copy, then reopen:')
-            print(current / 'ai-usagebar-menubar')
+            print(app)
     except Exception:
         subprocess.run(['launchctl', 'bootout', service], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if previous_link is not None:
             replace_link(previous_link)
         elif current.is_symlink():
             current.unlink()
+        if had_app and previous is not None:
+            build_app(previous, app)
+        elif not had_app:
+            shutil.rmtree(app, ignore_errors=True)
         if old_plist is not None:
             plist.write_bytes(old_plist)
         elif plist.exists():
@@ -85,11 +144,11 @@ def activate(root, target, start):
             subprocess.run(['defaults', 'delete', DOMAIN, 'binaryPath'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(['launchctl', 'disable' if was_disabled else 'enable', service], check=True)
         if was_loaded and old_plist is not None:
-            subprocess.run(['launchctl', 'bootstrap', f'gui/{os.getuid()}', str(plist)], check=True)
+            bootstrap(plist)
         raise
     if previous and previous != target:
         (root / 'previous-version').write_text(previous.name + '\n')
-    print(f'Installed {target.name}: {current}')
+    print(f'Installed {target.name}: {app}')
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

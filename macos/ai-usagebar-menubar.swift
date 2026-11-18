@@ -2259,10 +2259,10 @@ final class SettingsPaneController: NSTabViewController {
 
 // ─── Launch at login (macOS LaunchAgent) ─────────────────────────────────
 //
-// The app is an unbundled single binary, so the modern SMAppService.mainApp
-// API (which needs a bundle id) doesn't apply. A per-user LaunchAgent is the
-// portable way to start an unbundled executable at login — the same mechanism
-// install-agent.sh sets up, now toggleable from Settings.
+// A per-user LaunchAgent starts the app at login and (KeepAlive) brings it
+// back after a quit; SMAppService.mainApp can't do the second part. The same
+// plist works for the bare binary a dev build produces and for the installed
+// "AI Usage Bar.app", whose executable is what `selfExecutablePath` returns.
 let LAUNCH_AGENT_LABEL = "com.akitaonrails.ai-usagebar-menubar"
 
 func launchAgentPlistPath() -> String {
@@ -2293,7 +2293,7 @@ func selfExecutablePath() -> String {
 /// loads every agent in ~/Library/LaunchAgents at the next login, so writing
 /// (or removing) the file is all that's needed for a start-at-login toggle.
 func launchAgentPlist(executable: String) throws -> Data {
-    let plist: [String: Any] = [
+    var plist: [String: Any] = [
         "Label": LAUNCH_AGENT_LABEL,
         "ProgramArguments": [executable],
         "RunAtLoad": true,
@@ -2302,6 +2302,10 @@ func launchAgentPlist(executable: String) throws -> Data {
         "KeepAlive": true,
         "ProcessType": "Interactive",
     ]
+    // Lets System Settings → Login Items show the app by name and icon.
+    if let bundleID = Bundle.main.bundleIdentifier {
+        plist["AssociatedBundleIdentifiers"] = [bundleID]
+    }
     return try PropertyListSerialization.data(
         fromPropertyList: plist, format: .xml, options: 0)
 }
@@ -2862,6 +2866,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
     }
 
+    /// Opening the app from Spotlight, Launchpad or Finder while it already
+    /// runs has no window to bring forward, so show where it lives instead.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows { statusItem.button?.performClick(nil) }
+        return true
+    }
+
     func menuWillOpen(_ menu: NSMenu) {
         #if WIDGET_HOST
         widgetSyncStatusItem.title = widgetPublisher.message
@@ -2928,7 +2939,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let resources = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
             .resolvingSymlinksInPath().deletingLastPathComponent()
         let version = (try? String(contentsOf: resources.appendingPathComponent("VERSION"), encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "Personal edition"
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "Personal edition"
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "AI Usage Bar",
             .applicationVersion: version,

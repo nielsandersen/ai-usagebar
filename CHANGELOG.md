@@ -9,11 +9,30 @@ Each release is also published at
 
 ## [Unreleased]
 
+## [1.4.1-niels.8] — 2026-11-18
+
+### Added
+- **A real app in Applications.** The installer now assembles
+  `AI Usage Bar.app` (in `/Applications`, or `~/Applications` when that is not
+  writable) from the verified release files, so the app shows up in Spotlight,
+  Launchpad and System Settings → Login Items with its name and icon. Before
+  this it was a bare program under `~/.local/share` that nothing in macOS could
+  find, which made it look uninstalled whenever it was not running. Opening the
+  app while it already runs opens its menu instead of starting a second copy.
+  The bundle id equals the old settings domain (`ai-usagebar-menubar`), so every
+  preference carries over. The backend, the TUI and rollback still live under
+  `~/.local/share/ai-usagebar/versions`.
+
 ### Changed
 - **The menu bar app comes back after a quit.** The LaunchAgent now sets
   `KeepAlive`, because the app kept getting closed by accident and then stayed
   gone until the next login. To stop it on purpose:
   `launchctl bootout gui/$(id -u)/com.akitaonrails.ai-usagebar-menubar`.
+
+### Fixed
+- The installer waits for launchd after stopping the old copy instead of
+  failing and rolling back when the restart comes a few seconds too soon (seen
+  on every install over SSH).
 
 ## [1.4.1-niels.7] — 2026-11-01
 
