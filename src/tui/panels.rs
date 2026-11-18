@@ -1569,7 +1569,7 @@ mod tests {
     #[test]
     fn openai_weekly_only_omits_session_section() {
         let snap = OpenAiSnapshot {
-            plan: "ChatGPT Prolite".into(),
+            plan: "ChatGPT Pro 100".into(),
             session: None,
             weekly: Some(UsageWindow {
                 utilization_pct: 66,

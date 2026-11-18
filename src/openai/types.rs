@@ -180,8 +180,13 @@ impl UsageResponse {
     pub fn into_snapshot(self, plan_hint: Option<&str>) -> AppResult<OpenAiSnapshot> {
         let plan_type = self.plan_type.as_deref().or(plan_hint).unwrap_or("Unknown");
         // Team was renamed to Business; older payloads can retain the raw name.
+        // "prolite" is the raw value of the tier sold as Pro 100 (confirmed by
+        // the fork owner on his own account, 2026-11-18; OpenAI documents the
+        // Pro 100/200/500 names but not this mapping).
         let plan_name = if plan_type.eq_ignore_ascii_case("team") {
             "Business".into()
+        } else if plan_type.eq_ignore_ascii_case("prolite") {
+            "Pro 100".into()
         } else {
             capitalize(plan_type)
         };
@@ -518,7 +523,8 @@ mod tests {
             ("go", "ChatGPT Go"),
             ("plus", "ChatGPT Plus"),
             ("pro", "ChatGPT Pro"),
-            ("prolite", "ChatGPT Prolite"),
+            ("prolite", "ChatGPT Pro 100"),
+            ("ProLite", "ChatGPT Pro 100"),
             ("enterprise", "ChatGPT Enterprise"),
             ("edu", "ChatGPT Edu"),
             ("future", "ChatGPT Future"),

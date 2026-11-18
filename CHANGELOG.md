@@ -9,6 +9,15 @@ Each release is also published at
 
 ## [Unreleased]
 
+## [1.4.1-niels.10] — 2026-11-18
+
+### Fixed
+- **"ChatGPT Prolite" now reads "ChatGPT Pro 100".** OpenAI's usage endpoint
+  reports the 100-dollar Pro tier as `prolite`, a name that appears nowhere in
+  its product pages, so the menu showed a plan nobody sells. The mapping comes
+  from the owner's own account; OpenAI documents Pro 100, Pro 200 and Pro 500
+  but not the raw values, so the other two tiers are still shown as reported.
+
 ## [1.4.1-niels.9] — 2026-11-18
 
 ### Fixed
