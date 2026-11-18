@@ -3625,7 +3625,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let appearance = statusItem.button?.effectiveAppearance ?? NSApp.effectiveAppearance
         for it in overviewRows { it.isHidden = true }
         compactItem.isHidden = true
-        // With several Claude accounts the plan alone ("Claude Max 20x") no
+        // With several Claude accounts the plan alone ("Claude Ultra") no
         // longer says WHICH account this is — suffix the label.
         let plan = s.plan.isEmpty ? "AI Usage" : s.plan
         let header = accountLabel(of: VENDOR).map { "\(plan) · \($0)" } ?? plan

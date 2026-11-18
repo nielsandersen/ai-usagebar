@@ -346,7 +346,7 @@ mod tests {
             id: name.into(),
             name: name.into(),
             display_name: name.into(),
-            plan: Some("Claude Max 20x".into()),
+            plan: Some("Claude Ultra".into()),
             sections,
             error: None,
             stale: false,
@@ -393,10 +393,7 @@ mod tests {
             ],
         )]);
 
-        assert!(
-            text.contains("anthropic · gmail   Claude Max 20x"),
-            "{text}"
-        );
+        assert!(text.contains("anthropic · gmail   Claude Ultra"), "{text}");
         assert!(text.contains("29%   Resets in 0h 50m"), "{text}");
         assert!(text.contains("32%   Resets in 4d 2h"), "{text}");
     }
@@ -445,7 +442,7 @@ mod tests {
         );
         let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         let first = &value["entries"][0];
-        assert_eq!(first["plan"], "Claude Max 20x");
+        assert_eq!(first["plan"], "Claude Ultra");
         assert_eq!(first["display_name"], "anthropic · gmail");
         assert_eq!(first["metrics"][0]["percent"], 29);
         assert_eq!(first["metrics"][0]["detail"], "Resets in 0h 50m");

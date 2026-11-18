@@ -78,7 +78,7 @@ impl Cents {
 /// pay-as-you-go credit balance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnthropicSnapshot {
-    /// "Claude Pro", "Claude Max 5x", "Claude Max 20x", etc.
+    /// "Claude Pro", "Claude Max", "Claude Ultra", etc.
     pub plan: String,
     /// The 5-hour window. `None` when the account has no such limit: since
     /// 2026-10-30 the usage endpoint returns `five_hour: null` for verified
@@ -662,7 +662,7 @@ mod tests {
 
     fn snap(s: i32, w_: i32, sonnet: Option<i32>, extra: Option<(i64, i64)>) -> AnthropicSnapshot {
         AnthropicSnapshot {
-            plan: "Max 5x".into(),
+            plan: "Max".into(),
             session: Some(w(s)),
             weekly: w(w_),
             sonnet: sonnet.map(w),

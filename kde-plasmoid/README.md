@@ -10,11 +10,13 @@ and can't dock into a Plasma panel, so this shells out to the same
 `ai-usagebar` binary and draws with native Plasma/Kirigami components.
 
 ![The plasmoid in a Plasma 6 panel showing `5h 2%` and `7d 44%` with their bars,
-and its popup open below: a Claude / Claude Max 20x header with refresh and TUI
-buttons, a provider tab strip reading Claude, Codex, Z.AI and OpenRouter with the
+and its popup open below: a Claude header with the former Max 20x plan name,
+refresh and TUI buttons, a provider tab strip reading Claude, Codex, Z.AI and OpenRouter with the
 last two marked by a warning icon, then USAGE & BALANCE over Session (5h) 2%,
 Weekly (7d) 44% and Fable (7d) 7% — each a full-width bar with its pace text and a
 live "Resets in" countdown — and an "Updated just now" footer](../screenshots/kde-plasmoid.png)
+
+The current app calls that plan Ultra. The screenshot predates the rename.
 
 ## Vendor scope
 

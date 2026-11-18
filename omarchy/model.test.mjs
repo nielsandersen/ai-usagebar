@@ -63,7 +63,7 @@ const raw = JSON.stringify({primary: 'openai', entries: [
     id: 'anthropic@work',
     name: 'anthropic · work',
     display_name: 'Claude · work',
-    plan: 'Claude Max 20x',
+    plan: 'Claude Ultra',
     status: 'ready',
     error: null,
     stale: true,

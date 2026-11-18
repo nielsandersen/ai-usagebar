@@ -179,7 +179,13 @@ where
 impl UsageResponse {
     pub fn into_snapshot(self, plan_hint: Option<&str>) -> AppResult<OpenAiSnapshot> {
         let plan_type = self.plan_type.as_deref().or(plan_hint).unwrap_or("Unknown");
-        let plan = format!("ChatGPT {}", capitalize(plan_type));
+        // Team was renamed to Business; older payloads can retain the raw name.
+        let plan_name = if plan_type.eq_ignore_ascii_case("team") {
+            "Business".into()
+        } else {
+            capitalize(plan_type)
+        };
+        let plan = format!("ChatGPT {plan_name}");
 
         let (session, weekly) = classify_rate_limit(self.rate_limit.unwrap_or_default())?;
         let code_review = self
@@ -499,7 +505,35 @@ mod tests {
     fn plan_hint_used_when_response_omits_plan_type() {
         let r: UsageResponse = serde_json::from_str("{}").unwrap();
         let s = r.into_snapshot(Some("team")).unwrap();
-        assert_eq!(s.plan, "ChatGPT Team");
+        assert_eq!(s.plan, "ChatGPT Business");
+    }
+
+    #[test]
+    fn current_plan_names_preserve_unverified_and_unknown_types() {
+        for (raw, expected) in [
+            ("team", "ChatGPT Business"),
+            ("TEAM", "ChatGPT Business"),
+            ("business", "ChatGPT Business"),
+            ("free", "ChatGPT Free"),
+            ("go", "ChatGPT Go"),
+            ("plus", "ChatGPT Plus"),
+            ("pro", "ChatGPT Pro"),
+            ("prolite", "ChatGPT Prolite"),
+            ("enterprise", "ChatGPT Enterprise"),
+            ("edu", "ChatGPT Edu"),
+            ("future", "ChatGPT Future"),
+        ] {
+            let response: UsageResponse =
+                serde_json::from_value(serde_json::json!({"plan_type": raw})).unwrap();
+            assert_eq!(response.into_snapshot(Some("plus")).unwrap().plan, expected);
+            let response: UsageResponse = serde_json::from_str("{}").unwrap();
+            assert_eq!(response.into_snapshot(Some(raw)).unwrap().plan, expected);
+        }
+        let response: UsageResponse = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            response.into_snapshot(None).unwrap().plan,
+            "ChatGPT Unknown"
+        );
     }
 
     #[test]

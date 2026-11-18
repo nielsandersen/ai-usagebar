@@ -206,7 +206,7 @@ where
 impl UsageResponse {
     /// Lift the wire response into our canonical [`AnthropicSnapshot`].
     ///
-    /// `plan_label` is the rendered plan name ("Max 5x" etc.), derived from
+    /// `plan_label` is the rendered plan name ("Max" etc.), derived from
     /// the credentials file (since the usage endpoint doesn't include it).
     pub fn into_snapshot(self, plan_label: String) -> AnthropicSnapshot {
         // Window durations are constants per claudebar:172-173.
@@ -305,7 +305,7 @@ mod tests {
             "extra_usage":       {"is_enabled": true, "monthly_limit": 5000, "used_credits": 250}
         }"#;
         let resp: UsageResponse = serde_json::from_str(raw).unwrap();
-        let snap = resp.into_snapshot("Max 5x".into());
+        let snap = resp.into_snapshot("Max".into());
         let session = snap.session.as_ref().unwrap();
         assert_eq!(session.utilization_pct, 43); // rounded
         assert_eq!(snap.weekly.utilization_pct, 27);

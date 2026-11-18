@@ -657,7 +657,7 @@ mod tests {
             window_duration: chrono::Duration::days(7),
         };
         let snap = AnthropicSnapshot {
-            plan: "Max 5x".into(),
+            plan: "Max".into(),
             session: Some(session),
             weekly,
             sonnet: Some(sonnet),
@@ -869,7 +869,7 @@ mod tests {
         let oc = sample_outcome();
         let theme = Theme::default();
         let out = render_anthropic(&input(&oc, &theme));
-        assert!(out.tooltip.contains("Claude Max 5x"));
+        assert!(out.tooltip.contains("Claude Max"));
         assert!(out.tooltip.contains("Session"));
         assert!(out.tooltip.contains("Weekly"));
         assert!(out.tooltip.contains("Sonnet only"));

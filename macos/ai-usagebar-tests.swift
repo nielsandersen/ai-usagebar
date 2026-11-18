@@ -293,8 +293,9 @@ func testParserBalances() {
     // row", never as a 0% session, and the headline is then the weekly window.
     let ultra = snapshot(FORMAT, vendor: "anthropic",
                          fields: fields(through: 16, set: [
-                            3: "77", 4: "Mon", 16: "cld"
+                            0: "Ultra", 3: "77", 4: "Mon", 16: "cld"
                          ]))
+    assertEqual(ultra?.plan, "Ultra", "ultra plan name survives parsing")
     assertEqual(ultra?.hasUsageWindows, true, "ultra still shows windows")
     assertNil(ultra?.session, "ultra has no session row")
     assertEqual(ultra?.weekly?.pct, 77, "ultra weekly pct")

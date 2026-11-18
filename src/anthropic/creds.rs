@@ -65,17 +65,20 @@ where
 }
 
 impl OauthCreds {
-    /// Plan label rendered the way claudebar does (claudebar:547-550):
-    ///   "${sub_type^} [5x|20x]" (first letter capitalized, optional tier suffix).
+    /// Current product name, accepting both legacy 20x tiers and Ultra names.
     pub fn plan_label(&self) -> String {
+        let subscription = self.subscription_type.to_ascii_lowercase();
+        let tier = self.rate_limit_tier.to_ascii_lowercase();
+        if tier.contains("20x") || subscription.contains("ultra") || tier.contains("ultra") {
+            return "Ultra".into();
+        }
         let mut name = capitalize_first(&self.subscription_type);
         if name.is_empty() {
             name = "Unknown".into();
         }
-        if self.rate_limit_tier.contains("5x") {
+        // The remaining Max tier is now sold as Max, without a 5x suffix.
+        if self.rate_limit_tier.contains("5x") && subscription != "max" {
             name.push_str(" 5x");
-        } else if self.rate_limit_tier.contains("20x") {
-            name.push_str(" 20x");
         }
         name
     }
@@ -400,7 +403,7 @@ mod tests {
         let creds = read_from(f.path()).unwrap();
         assert_eq!(creds.claude_ai_oauth.access_token, "AT");
         assert_eq!(creds.claude_ai_oauth.expires_at_ms, 1735000000000);
-        assert_eq!(creds.claude_ai_oauth.plan_label(), "Max 5x");
+        assert_eq!(creds.claude_ai_oauth.plan_label(), "Max");
     }
 
     #[test]
@@ -438,7 +441,7 @@ mod tests {
             }}"#,
         );
         let creds = read_from(f.path()).unwrap();
-        assert_eq!(creds.claude_ai_oauth.plan_label(), "Max 20x");
+        assert_eq!(creds.claude_ai_oauth.plan_label(), "Ultra");
     }
 
     #[test]
@@ -451,6 +454,55 @@ mod tests {
         );
         let creds = read_from(f.path()).unwrap();
         assert_eq!(creds.claude_ai_oauth.plan_label(), "Unknown");
+    }
+
+    #[test]
+    fn plan_label_accepts_legacy_and_new_ultra_names() {
+        for (subscription, tier) in [
+            ("max", "default_claude_max_20x"),
+            ("", "default_claude_max_20X"),
+            ("ultra", ""),
+            ("ULTRA", ""),
+            ("claude_UlTrA", "default_claude_max_5x"),
+            ("max", "default_claude_ULTRA"),
+            ("", "default_claude_UlTrA_5x"),
+            ("max", "default_claude_max_5x_20x"),
+        ] {
+            let creds = OauthCreds {
+                access_token: String::new(),
+                refresh_token: String::new(),
+                expires_at_ms: 0,
+                subscription_type: subscription.into(),
+                rate_limit_tier: tier.into(),
+                scopes: None,
+            };
+            assert_eq!(creds.plan_label(), "Ultra", "{subscription:?}, {tier:?}");
+        }
+    }
+
+    #[test]
+    fn plan_label_preserves_other_subscriptions() {
+        for (subscription, tier, expected) in [
+            ("max", "default_claude_max_5x", "Max"),
+            ("max", "", "Max"),
+            ("pro", "", "Pro"),
+            ("free", "", "Free"),
+            ("team", "", "Team"),
+            ("enterprise", "", "Enterprise"),
+            ("future", "", "Future"),
+            ("future", "5x", "Future 5x"),
+            ("", "", "Unknown"),
+        ] {
+            let creds = OauthCreds {
+                access_token: String::new(),
+                refresh_token: String::new(),
+                expires_at_ms: 0,
+                subscription_type: subscription.into(),
+                rate_limit_tier: tier.into(),
+                scopes: None,
+            };
+            assert_eq!(creds.plan_label(), expected, "{subscription:?}, {tier:?}");
+        }
     }
 
     #[test]

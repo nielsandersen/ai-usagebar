@@ -37,7 +37,7 @@ These are compatible with claudebar.
 
 | Placeholder | Example |
 |---|---|
-| `{plan}` | `Max 5x` |
+| `{plan}` | `Max` or `Ultra` |
 | `{session_pct}`, `{session_reset}`, `{session_bar}`, `{session_elapsed}` | `62`, `1h 30m`, `█████████████░░░░░░░`, `58` |
 | `{session_pace}`, `{session_pace_indicator}`, `{session_pace_pct}`, `{session_pace_pts}`, `{session_pace_delta}`, `{session_pace_abs_delta}` | `↑`, `↑`, `12% ahead`, `4pts ahead`, `4`, `4` |
 | `{weekly_*}` | The same family for the seven-day window. |
@@ -55,6 +55,9 @@ window is absent, it returns neutral empty, `0`, or `—` values as appropriate.
 `{oai_session_pace_indicator}`, `{oai_weekly_*}`,
 `{oai_code_review_pct}`, `{oai_credit_balance}`, `{oai_local_msgs}`,
 `{oai_cloud_msgs}`
+
+Plan labels include `ChatGPT Plus`, `ChatGPT Pro` and `ChatGPT Business`.
+The legacy `team` value also displays as `ChatGPT Business`.
 
 Session and weekly families are empty when the API omits that window. The
 default widget automatically uses weekly values for a weekly-only response.

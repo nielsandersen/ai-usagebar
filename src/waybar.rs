@@ -98,7 +98,7 @@ mod tests {
     fn serializes_compact_json() {
         let out = WaybarOutput {
             text: "42% · 1h 30m".into(),
-            tooltip: "<b>Claude Max 5x</b>".into(),
+            tooltip: "<b>Claude Max</b>".into(),
             class: Class::Mid,
         };
         let line = out.to_json_line();

@@ -118,7 +118,7 @@ const RAW = JSON.stringify({
     primary: 'openai',
     entries: [
         {
-            id: 'anthropic', display_name: 'Claude', name: 'anthropic', plan: 'Max 20x',
+            id: 'anthropic', display_name: 'Claude', name: 'anthropic', plan: 'Ultra',
             status: 'ready', stale: false, error: null,
             fetched_at: '2026-01-01T00:00:00Z',
             sections: [
@@ -234,7 +234,7 @@ const openai = entryFor(report, 'openai');
 const zai = entryFor(report, 'zai');
 
 assert.equal(anthropic.label, 'Claude');
-assert.equal(anthropic.plan, 'Max 20x');
+assert.equal(anthropic.plan, 'Ultra');
 assert.equal(openai.stale, true);
 assert.equal(zai.status, 'error');
 

@@ -9,6 +9,17 @@ Each release is also published at
 
 ## [Unreleased]
 
+## [1.4.1-niels.9] — 2026-11-18
+
+### Fixed
+- **Claude plan names match the current products.** Accounts on the former
+  Max 20x tier showed "Max 20x" in the menu bar, TUI and widgets. They now show
+  "Ultra", whether credentials contain the legacy 20x tier or an Ultra name.
+  The five-times tier now shows "Max" instead of "Max 5x", matching Anthropic's
+  current pricing page. Usage limits and account credentials are unchanged.
+- OpenAI accounts reporting the old "team" plan now show "ChatGPT Business",
+  matching OpenAI's renamed product.
+
 ## [1.4.1-niels.8] — 2026-11-18
 
 ### Added

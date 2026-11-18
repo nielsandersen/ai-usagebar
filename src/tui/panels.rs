@@ -1335,7 +1335,7 @@ mod tests {
     #[test]
     fn anthropic_sections_include_all_three_windows_when_present() {
         let snap = AnthropicSnapshot {
-            plan: "Max 20x".into(),
+            plan: "Ultra".into(),
             session: Some(UsageWindow {
                 utilization_pct: 60,
                 resets_at: Some(now() + chrono::Duration::hours(1)),

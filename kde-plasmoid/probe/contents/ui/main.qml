@@ -53,7 +53,7 @@ PlasmoidItem {
         const REPORT = JSON.stringify({
             primary: "anthropic",
             entries: [{
-                id: "anthropic", display_name: "Claude", plan: "Max 20x",
+                id: "anthropic", display_name: "Claude", plan: "Ultra",
                 status: "ready", stale: false, error: null,
                 fetched_at: "2026-01-01T00:00:00Z",
                 sections: [
