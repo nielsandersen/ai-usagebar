@@ -58,7 +58,7 @@ def activate(root, target, start):
         if old_plist is not None or login_enabled:
             plist.parent.mkdir(parents=True, exist_ok=True)
             data = {'Label': LABEL, 'ProgramArguments': [str(current / 'ai-usagebar-menubar')],
-                    'RunAtLoad': True, 'ProcessType': 'Interactive'}
+                    'RunAtLoad': True, 'KeepAlive': True, 'ProcessType': 'Interactive'}
             fd, tmp = tempfile.mkstemp(prefix='.ai-usagebar-', dir=plist.parent)
             with os.fdopen(fd, 'wb') as stream:
                 plistlib.dump(data, stream)

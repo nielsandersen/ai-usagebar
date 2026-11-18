@@ -9,6 +9,12 @@ Each release is also published at
 
 ## [Unreleased]
 
+### Changed
+- **The menu bar app comes back after a quit.** The LaunchAgent now sets
+  `KeepAlive`, because the app kept getting closed by accident and then stayed
+  gone until the next login. To stop it on purpose:
+  `launchctl bootout gui/$(id -u)/com.akitaonrails.ai-usagebar-menubar`.
+
 ## [1.4.1-niels.7] — 2026-11-01
 
 ### Fixed

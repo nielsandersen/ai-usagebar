@@ -545,6 +545,7 @@ func testSystemIntegrations() {
         assertEqual((plist?["ProgramArguments"] as? [String])?.first, executable,
                     "launch agent executable is preserved")
         assertEqual(plist?["RunAtLoad"] as? Bool, true, "launch agent runs at login")
+        assertEqual(plist?["KeepAlive"] as? Bool, true, "launch agent restarts after a quit")
     } catch {
         print("  ✗ launch agent plist: \(error)")
         failures += 1

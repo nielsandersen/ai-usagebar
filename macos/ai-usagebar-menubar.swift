@@ -2297,6 +2297,9 @@ func launchAgentPlist(executable: String) throws -> Data {
         "Label": LAUNCH_AGENT_LABEL,
         "ProgramArguments": [executable],
         "RunAtLoad": true,
+        // Quit (⌘Q with the menu open) is easy to hit by accident; launchd
+        // brings the app back. To stop it for real: launchctl bootout.
+        "KeepAlive": true,
         "ProcessType": "Interactive",
     ]
     return try PropertyListSerialization.data(

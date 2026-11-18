@@ -61,7 +61,7 @@ Start at login — toggle **Preferências… → Sistema → "Iniciar no login"*
 app, or from the shell:
 
 ```bash
-./install-agent.sh         # installs a LaunchAgent (RunAtLoad)
+./install-agent.sh         # installs a LaunchAgent (RunAtLoad + KeepAlive)
 ```
 
 > Not code-signed. It's a local binary you built yourself, so Gatekeeper

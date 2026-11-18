@@ -65,8 +65,9 @@ Or do it from the shell:
 
 Either way installs a LaunchAgent at
 `~/Library/LaunchAgents/com.akitaonrails.ai-usagebar-menubar.plist` with
-`RunAtLoad`, so the app starts on every login. It is not kept alive after you
-choose **Sair/Quit**.
+`RunAtLoad` and `KeepAlive`, so the app starts on every login and comes back
+within seconds if it is quit or crashes. To stop it until the next login:
+`launchctl bootout gui/$(id -u)/com.akitaonrails.ai-usagebar-menubar`.
 
 ### 7. Verify it's running
 
