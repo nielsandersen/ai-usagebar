@@ -9,7 +9,8 @@ cargo build --release --locked --bins
 ./macos/build.sh
 OUT="$ROOT/dist/ai-usagebar-macos-$ARCH"
 mkdir -p "$OUT"
-cp target/release/ai-usagebar target/release/ai-usagebar-tui macos/ai-usagebar-menubar "$OUT/"
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+cp "$TARGET_DIR/release/ai-usagebar" "$TARGET_DIR/release/ai-usagebar-tui" macos/ai-usagebar-menubar "$OUT/"
 cp macos/release/install.py macos/assets/AppIcon.icns "$OUT/"
 printf '%s\n' "$VERSION" > "$OUT/VERSION"
 (cd "$OUT" && shasum -a 256 ai-usagebar ai-usagebar-tui ai-usagebar-menubar AppIcon.icns install.py VERSION > SHA256SUMS)
