@@ -1718,7 +1718,7 @@ vendors. Highlights:
 - Live API smoke test suite (`make smoke`) that exercises the real
   undocumented endpoints to detect schema drift before users do.
 
-[Unreleased]: ../../compare/macos-v1.4.1-niels.11...codex/macos-personal
+[Unreleased]: https://github.com/nielsandersen/ai-usagebar/compare/macos-v1.4.1-niels.11...codex/macos-personal
 [1.4.1-niels.6]: https://github.com/nielsandersen/ai-usagebar/compare/macos-v1.4.1-niels.5...macos-v1.4.1-niels.6
 [1.4.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.0...v1.3.1
@@ -1775,4 +1775,4 @@ vendors. Highlights:
 
 [1.4.1-niels.5]: https://github.com/nielsandersen/ai-usagebar/releases/tag/macos-v1.4.1-niels.5
 
-[1.4.1-niels.11]: ../../releases/tag/macos-v1.4.1-niels.11
+[1.4.1-niels.11]: https://github.com/nielsandersen/ai-usagebar/releases/tag/macos-v1.4.1-niels.11
