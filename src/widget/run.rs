@@ -164,9 +164,14 @@ async fn build_output(cli: &Cli) -> Result<WaybarOutput> {
 }
 
 fn validate_vendor_options(cli: &Cli, vendor: Vendor) -> Result<()> {
-    if cli.account.is_some() && !matches!(vendor, Vendor::Anthropic | Vendor::Openrouter) {
+    if cli.account.is_some()
+        && !matches!(
+            vendor,
+            Vendor::Anthropic | Vendor::Openai | Vendor::Openrouter
+        )
+    {
         return Err(AppError::Other(
-            "--account is supported only for Claude and OpenRouter".into(),
+            "--account is supported only for Claude, Codex, and OpenRouter".into(),
         ));
     }
     if cli.desktop && vendor != Vendor::Anthropic {
@@ -582,20 +587,36 @@ async fn anthropic_api_output(cli: &Cli, config: &Config) -> Result<WaybarOutput
     ))
 }
 
+fn openai_target(cli: &Cli, config: &Config) -> Result<(std::path::PathBuf, Cache)> {
+    let label = cli.account.as_deref();
+    let path = config.openai.auth_path(label)?;
+    let cache = match (&cli.cache_dir, label) {
+        (Some(root), Some(label)) => Cache::at(root.join("openai").join(label)),
+        (Some(root), None) => Cache::at(root.join("openai")),
+        (None, Some(label)) => Cache::for_vendor_account("openai", label)?,
+        (None, None) => Cache::for_vendor("openai")?,
+    };
+    Ok((path, cache))
+}
+
 async fn openai_output(cli: &Cli, config: &Config) -> Result<WaybarOutput> {
     let client = http_client()?;
-    let cache = vendor_cache(cli, "openai")?;
-    let creds_path = match config.openai.codex_auth_path.as_deref() {
-        Some(p) => p.to_path_buf(),
-        None => openai::creds::default_path()?,
-    };
+    let (creds_path, cache) = openai_target(cli, config)?;
     let endpoints = openai::fetch::Endpoints::default();
-    let outcome =
-        match openai::fetch_snapshot(&client, &creds_path, &cache, &endpoints, DEFAULT_TTL).await {
-            Ok(o) => o,
-            Err(e) if e.is_transient() => return Ok(WaybarOutput::loading(cli.icon.as_deref())),
-            Err(e) => return Err(e),
-        };
+    let outcome = match openai::fetch::fetch_account_snapshot(
+        &client,
+        &creds_path,
+        &cache,
+        &endpoints,
+        DEFAULT_TTL,
+        cli.account.as_deref(),
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(e) if e.is_transient() => return Ok(WaybarOutput::loading(cli.icon.as_deref())),
+        Err(e) => return Err(e),
+    };
 
     let theme = theme_from_cli(cli);
     let snap = outcome.snapshot.clone();
@@ -1185,5 +1206,46 @@ mod tests {
         cli.desktop = true;
         assert!(validate_vendor_options(&cli, Vendor::Openrouter).is_err());
         assert!(validate_vendor_options(&cli, Vendor::Anthropic).is_ok());
+    }
+
+    #[test]
+    fn codex_targets_and_caches_cannot_cross_labels() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.openai.codex_auth_path = Some(root.path().join("default/auth.json"));
+        for label in ["client", "personal"] {
+            config.openai.accounts.push(crate::config::OpenAiAccount {
+                label: label.into(),
+                codex_home: root.path().join(label),
+            });
+        }
+        let cli = cli_with(Some("client"), None, root.path().to_str());
+        assert!(validate_vendor_options(&cli, Vendor::Openai).is_ok());
+        let (path, cache) = openai_target(&cli, &config).unwrap();
+        assert_eq!(path, root.path().join("client/auth.json"));
+        assert_eq!(cache.dir(), root.path().join("openai/client"));
+        cache.write_payload(b"client-only").unwrap();
+        for label in [Some("personal"), None] {
+            let (path, other) =
+                openai_target(&cli_with(label, None, root.path().to_str()), &config).unwrap();
+            assert_eq!(
+                path,
+                root.path()
+                    .join(label.unwrap_or("default"))
+                    .join("auth.json")
+            );
+            assert!(other.maybe_payload().unwrap().is_none());
+        }
+        let default_cli = cli_with(None, None, root.path().to_str());
+        assert_eq!(
+            openai_target(&default_cli, &config).unwrap().1.dir(),
+            root.path().join("openai")
+        );
+        let unknown = cli_with(Some("typo"), None, root.path().to_str());
+        let error = openai_target(&unknown, &config).unwrap_err().to_string();
+        assert!(error.contains("client") && error.contains("personal"));
+        let mut desktop = cli.clone();
+        desktop.desktop = true;
+        assert!(validate_vendor_options(&desktop, Vendor::Openai).is_err());
     }
 }

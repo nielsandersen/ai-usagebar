@@ -116,7 +116,7 @@ pub struct Cli {
     #[arg(long, value_name = "FILE")]
     pub creds_path: Option<std::path::PathBuf>,
 
-    /// Select a named Claude or OpenRouter account from the matching
+    /// Select a named Claude, Codex, or OpenRouter account from the matching
     /// `[[...accounts]]` config array. Without it, the vendor's default account
     /// and original cache path are unchanged. For Claude it conflicts with the
     /// lower-level `--creds-path` because both select a credential source.
@@ -137,7 +137,7 @@ pub struct Cli {
 
 #[derive(clap::Subcommand, Debug, Clone)]
 pub enum Command {
-    /// Manage named Claude (Anthropic) accounts.
+    /// Manage named Claude and Codex accounts.
     Account {
         #[command(subcommand)]
         action: AccountAction,
@@ -190,7 +190,7 @@ pub enum SettingsAction {
 
 #[derive(clap::Subcommand, Debug, Clone)]
 pub enum AccountAction {
-    /// Register an isolated account and open Claude Code to sign it in.
+    /// Register an isolated account and open its CLI to sign it in.
     Add {
         /// Stable name used by `--account`, the TUI, and desktop apps.
         label: String,
@@ -198,6 +198,10 @@ pub enum AccountAction {
         /// Only register the account; do not launch interactive login.
         #[arg(long, conflicts_with = "desktop")]
         no_login: bool,
+
+        /// Register a Codex account and run `codex login` in its own CODEX_HOME.
+        #[arg(long, conflicts_with = "desktop")]
+        codex: bool,
 
         /// Capture a Claude **Desktop app** account under this label instead
         /// of a `claude` CLI one (macOS). The app has a single login slot, so
@@ -216,7 +220,7 @@ pub enum AccountAction {
         yes: bool,
     },
 
-    /// Show which Claude account the Desktop app and the `claude` CLI use.
+    /// Show Claude identities and named Codex accounts.
     Status {
         /// Machine-readable output, consumed by the macOS menu bar.
         #[arg(long)]
@@ -752,5 +756,51 @@ mod tests {
         let cli = Cli::parse_from(["ai-usagebar", "--watch", "5"]);
         assert_eq!(cli.watch, Some(5));
         assert!(!cli.output_json());
+    }
+
+    #[test]
+    fn codex_add_flags_and_selection_conflicts() {
+        let cli = Cli::try_parse_from([
+            "ai-usagebar",
+            "account",
+            "add",
+            "client",
+            "--codex",
+            "--no-login",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Account {
+                action: AccountAction::Add {
+                    codex: true,
+                    no_login: true,
+                    ..
+                }
+            })
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "ai-usagebar",
+                "account",
+                "add",
+                "client",
+                "--codex",
+                "--desktop"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "ai-usagebar",
+                "--vendor",
+                "openai",
+                "--account",
+                "client",
+                "--creds-path",
+                "/invented"
+            ])
+            .is_err()
+        );
     }
 }

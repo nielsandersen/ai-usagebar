@@ -43,6 +43,27 @@ pub struct FetchOutcome {
     pub cache_age: Option<Duration>,
 }
 
+/// Named accounts use the exact default refresh flow, with a scoped login hint.
+pub async fn fetch_account_snapshot(
+    client: &reqwest::Client,
+    creds_path: &Path,
+    cache: &Cache,
+    endpoints: &Endpoints,
+    cache_ttl: Duration,
+    label: Option<&str>,
+) -> Result<FetchOutcome> {
+    fetch_snapshot(client, creds_path, cache, endpoints, cache_ttl).await.map_err(|error| {
+        if let Some(label) = label
+            && matches!(&error, AppError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound)
+        {
+            return AppError::Credentials(format!(
+                "Codex account {label:?} is not signed in; run `ai-usagebar account add {label} --codex`"
+            ));
+        }
+        error
+    })
+}
+
 pub async fn fetch_snapshot(
     client: &reqwest::Client,
     creds_path: &Path,
@@ -416,5 +437,91 @@ mod tests {
         assert!(out.stale);
         assert_eq!(out.snapshot.session.as_ref().unwrap().utilization_pct, 50);
         assert_eq!(out.last_error.as_ref().map(|(c, _)| *c), Some(500));
+    }
+    #[tokio::test]
+    async fn named_refresh_writes_only_its_own_auth_and_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::OpenAiConfig {
+            codex_auth_path: Some(root.path().join("default/auth.json")),
+            ..Default::default()
+        };
+        let original = r#"{"tokens":{"access_token":"old-access","refresh_token":"old-refresh","id_token":"old-id","account_id":"invented-account","expires_at":"2000-01-01T00:00:00Z"},"preserved":"value"}"#;
+        for label in ["default", "client", "personal"] {
+            let dir = root.path().join(label);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("auth.json"), original).unwrap();
+            if label != "default" {
+                config.accounts.push(crate::config::OpenAiAccount {
+                    label: label.into(),
+                    codex_home: dir,
+                });
+            }
+        }
+        let mut server = mockito::Server::new_async().await;
+        let refresh = server.mock("POST", "/token")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({"refresh_token":"old-refresh"})))
+            .with_status(200)
+            .with_body(r#"{"access_token":"new-access","refresh_token":"new-refresh","id_token":"new-id","expires_in":3600}"#)
+            .expect(1).create_async().await;
+        let usage = server.mock("GET", "/usage")
+            .match_header("authorization", "Bearer new-access")
+            .match_header("ChatGPT-Account-Id", "invented-account")
+            .with_status(200)
+            .with_body(r#"{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":42,"limit_window_seconds":18000,"reset_at":2000000000}}}"#)
+            .expect(1).create_async().await;
+        let endpoints = Endpoints {
+            usage: format!("{}/usage", server.url()),
+            token: format!("{}/token", server.url()),
+        };
+        let cache = Cache::at(root.path().join("cache/openai/client"));
+        let path = config.auth_path(Some("client")).unwrap();
+        let client = reqwest::Client::new();
+        let outcome = fetch_account_snapshot(
+            &client,
+            &path,
+            &cache,
+            &endpoints,
+            Duration::ZERO,
+            Some("client"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.snapshot.session.unwrap().utilization_pct, 42);
+        let auth = creds::read_from(&path).unwrap();
+        assert_eq!(auth.tokens.refresh_token, "new-refresh");
+        assert_eq!(auth.extra["preserved"], "value");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        for label in ["default", "personal"] {
+            assert_eq!(
+                std::fs::read_to_string(root.path().join(label).join("auth.json")).unwrap(),
+                original
+            );
+        }
+        let other_cache = Cache::at(root.path().join("cache/openai/personal"));
+        assert!(other_cache.maybe_payload().unwrap().is_none());
+        // Even with a fresh cache, a missing login cannot show someone else's usage.
+        std::fs::remove_file(&path).unwrap();
+        let error = fetch_account_snapshot(
+            &client,
+            &path,
+            &cache,
+            &endpoints,
+            Duration::from_secs(300),
+            Some("client"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("not signed in"));
+        assert!(error.contains("ai-usagebar account add client --codex"));
+        refresh.assert_async().await;
+        usage.assert_async().await;
     }
 }

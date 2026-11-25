@@ -642,4 +642,20 @@ mod tests {
         failed.error = Some("not signed in".into());
         assert_eq!(report_exit_code(&[failed, entry("cursor", Vec::new())]), 0);
     }
+    #[test]
+    fn codex_accounts_keep_distinct_report_ids_and_json_rows() {
+        let now = Utc::now();
+        let entries: Vec<_> = ["client", "personal"]
+            .into_iter()
+            .map(|label| {
+                let tab = TabId::account_for(VendorId::Openai, label);
+                entry_from_state(&tab, &TabState::Error("not signed in".into()), now)
+            })
+            .collect();
+        let json: serde_json::Value =
+            serde_json::from_str(&render_json_for_primary(&entries, None)).unwrap();
+        assert_eq!(json["entries"][0]["id"], "openai@client");
+        assert_eq!(json["entries"][1]["id"], "openai@personal");
+        assert_eq!(entries[0].display_name, "Codex \u{b7} client");
+    }
 }

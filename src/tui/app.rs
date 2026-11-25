@@ -139,6 +139,14 @@ fn build_tabs(config: &Config, desktop_labels: &[String]) -> Vec<TabId> {
             for label in desktop_labels {
                 tabs.push(TabId::desktop_account(label.clone()));
             }
+        } else if vendor == VendorId::Openai {
+            let accounts = config.openai.all_accounts();
+            if config.openai.show_default_account || accounts.is_empty() {
+                tabs.push(TabId::vendor(vendor));
+            }
+            for account in accounts {
+                tabs.push(TabId::account_for(vendor, account.label));
+            }
         } else if vendor == VendorId::Openrouter {
             if config.openrouter.show_default_account || config.openrouter.accounts.is_empty() {
                 tabs.push(TabId::vendor(vendor));
@@ -514,16 +522,22 @@ async fn build_outcome(client: &Client, config: &Config, tab: &TabId) -> Result<
             Ok(outcome.into())
         }
         VendorId::Openai => {
-            let cache = crate::cache::Cache::for_vendor("openai")?;
-            let creds_path = config
-                .openai
-                .codex_auth_path
-                .clone()
-                .unwrap_or_else(|| crate::openai::creds::default_path().unwrap_or_default());
+            let label = tab.account.as_deref();
+            let creds_path = config.openai.auth_path(label)?;
+            let cache = match label {
+                Some(label) => crate::cache::Cache::for_vendor_account("openai", label)?,
+                None => crate::cache::Cache::for_vendor("openai")?,
+            };
             let endpoints = crate::openai::fetch::Endpoints::default();
-            let outcome =
-                crate::openai::fetch_snapshot(client, &creds_path, &cache, &endpoints, DEFAULT_TTL)
-                    .await?;
+            let outcome = crate::openai::fetch::fetch_account_snapshot(
+                client,
+                &creds_path,
+                &cache,
+                &endpoints,
+                DEFAULT_TTL,
+                label,
+            )
+            .await?;
             Ok(outcome.into())
         }
         VendorId::Deepseek => {
@@ -1319,6 +1333,44 @@ mod tests {
         assert_eq!(
             app.active_tab_id(),
             Some(&TabId::vendor(VendorId::Anthropic))
+        );
+    }
+
+    #[test]
+    fn codex_tabs_follow_default_and_keep_it_when_no_accounts_exist() {
+        let mut config = Config::default();
+        config.openai.accounts = ["client", "personal"]
+            .into_iter()
+            .map(|label| crate::config::OpenAiAccount {
+                label: label.into(),
+                codex_home: std::path::PathBuf::from("/invented").join(label),
+            })
+            .collect();
+        let codex_tabs = |config: &Config| {
+            tabs_from_config(config)
+                .into_iter()
+                .filter(|t| t.vendor == VendorId::Openai)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            codex_tabs(&config),
+            vec![
+                TabId::vendor(VendorId::Openai),
+                TabId::account_for(VendorId::Openai, "client"),
+                TabId::account_for(VendorId::Openai, "personal")
+            ]
+        );
+        config.openai.show_default_account = false;
+        assert_eq!(codex_tabs(&config).len(), 2);
+        config.openai.accounts.clear();
+        assert_eq!(codex_tabs(&config), vec![TabId::vendor(VendorId::Openai)]);
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("discovered")).unwrap();
+        std::fs::write(root.path().join("discovered/auth.json"), "{}").unwrap();
+        config.openai.accounts_dir = Some(root.path().to_path_buf());
+        assert_eq!(
+            codex_tabs(&config),
+            vec![TabId::account_for(VendorId::Openai, "discovered")]
         );
     }
 }

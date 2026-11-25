@@ -330,7 +330,7 @@ pub fn validate_account_label(label: &str) -> Result<()> {
     validate_account_label_for("anthropic", label)
 }
 
-fn validate_account_label_for(vendor: &str, label: &str) -> Result<()> {
+pub fn validate_account_label_for(vendor: &str, label: &str) -> Result<()> {
     const RESERVED: [&str; 4] = ["usage.json", ".stale", ".last_error", ".fetch.lock"];
     let bad = label.is_empty()
         || label == "."
@@ -413,22 +413,41 @@ pub fn add_anthropic_account_to_doc(
     label: &str,
     credentials_path: &str,
 ) -> Result<()> {
+    add_account_to_doc(
+        doc,
+        "anthropic",
+        label,
+        "credentials_path",
+        credentials_path,
+    )
+}
+
+/// Append a named account while preserving the existing document formatting.
+pub fn add_account_to_doc(
+    doc: &mut toml_edit::DocumentMut,
+    vendor: &str,
+    label: &str,
+    path_key: &str,
+    path: &str,
+) -> Result<()> {
     use toml_edit::{Item, Table, value};
 
-    validate_account_label(label)?;
+    validate_account_label_for(vendor, label)?;
 
-    let anthropic = doc
-        .entry("anthropic")
+    let provider = doc
+        .entry(vendor)
         .or_insert_with(|| Item::Table(Table::new()));
-    let anthropic = anthropic
+    let provider = provider
         .as_table_mut()
-        .ok_or_else(|| AppError::Other("[anthropic] in config.toml is not a table".into()))?;
+        .ok_or_else(|| AppError::Other(format!("[{vendor}] in config.toml is not a table")))?;
 
-    let accounts = anthropic
+    let accounts = provider
         .entry("accounts")
         .or_insert_with(|| Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
     let accounts = accounts.as_array_of_tables_mut().ok_or_else(|| {
-        AppError::Other("[[anthropic.accounts]] in config.toml is not an array of tables".into())
+        AppError::Other(format!(
+            "[[{vendor}.accounts]] in config.toml is not an array of tables"
+        ))
     })?;
 
     let exists = accounts
@@ -436,13 +455,13 @@ pub fn add_anthropic_account_to_doc(
         .any(|t| t.get("label").and_then(Item::as_str) == Some(label));
     if exists {
         return Err(AppError::Credentials(format!(
-            "anthropic account {label:?} already exists in config.toml"
+            "{vendor} account {label:?} already exists in config.toml"
         )));
     }
 
     let mut table = Table::new();
     table["label"] = value(label);
-    table["credentials_path"] = value(credentials_path);
+    table[path_key] = value(path);
     accounts.push(table);
     Ok(())
 }
@@ -453,6 +472,12 @@ pub struct OpenAiConfig {
     pub enabled: bool,
     /// Override the Codex auth file path (defaults to `~/.codex/auth.json`).
     pub codex_auth_path: Option<PathBuf>,
+    /// Named CODEX_HOME directories, selected with `--account`.
+    pub accounts: Vec<OpenAiAccount>,
+    /// Discover immediate subdirectories containing auth.json. Explicit entries win.
+    pub accounts_dir: Option<PathBuf>,
+    /// Hide the default only when at least one named account exists.
+    pub show_default_account: bool,
     /// Reserved, and inert: names the env var an API-key-only path *would*
     /// read (admin key → `/v1/organization/costs`). Nothing consumes it —
     /// OpenAI usage comes solely from Codex OAuth. Kept because that path is
@@ -468,7 +493,78 @@ impl Default for OpenAiConfig {
         Self {
             enabled: true,
             codex_auth_path: None,
+            accounts: Vec::new(),
+            accounts_dir: None,
+            show_default_account: true,
             admin_key_env: "OPENAI_ADMIN_KEY".to_string(),
+        }
+    }
+}
+
+/// One independently signed-in Codex home.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenAiAccount {
+    pub label: String,
+    pub codex_home: PathBuf,
+}
+
+impl OpenAiAccount {
+    pub fn auth_path(&self) -> PathBuf {
+        self.codex_home.join("auth.json")
+    }
+}
+
+impl OpenAiConfig {
+    pub fn all_accounts(&self) -> Vec<OpenAiAccount> {
+        let mut out = self.accounts.clone();
+        if let Some(dir) = &self.accounts_dir
+            && let Ok(entries) = std::fs::read_dir(dir)
+        {
+            let mut discovered: Vec<_> = entries
+                .flatten()
+                .filter_map(|entry| {
+                    let path = entry.path();
+                    if !path.is_dir() || !path.join("auth.json").is_file() {
+                        return None;
+                    }
+                    let label = path.file_name()?.to_str()?.to_string();
+                    validate_account_label_for("openai", &label).ok()?;
+                    Some(OpenAiAccount {
+                        label,
+                        codex_home: path,
+                    })
+                })
+                .collect();
+            discovered.sort_by(|a, b| a.label.cmp(&b.label));
+            for account in discovered {
+                if !out.iter().any(|a| a.label == account.label) {
+                    out.push(account);
+                }
+            }
+        }
+        out
+    }
+
+    pub fn account(&self, label: &str) -> Result<OpenAiAccount> {
+        validate_account_label_for("openai", label)?;
+        let all = self.all_accounts();
+        all.iter().find(|a| a.label == label).cloned().ok_or_else(|| {
+            let known: Vec<_> = all.iter().map(|a| a.label.as_str()).collect();
+            AppError::Credentials(format!(
+                "openai account {label:?} not found in [[openai.accounts]] or accounts_dir; known labels: {known:?}"
+            ))
+        })
+    }
+
+    /// Resolve credentials without ever falling back from a named account.
+    pub fn auth_path(&self, label: Option<&str>) -> Result<PathBuf> {
+        match label {
+            Some(label) => Ok(self.account(label)?.auth_path()),
+            None => self
+                .codex_auth_path
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(crate::openai::creds::default_path),
         }
     }
 }
@@ -956,6 +1052,10 @@ impl Config {
         expand_tilde_opt(&mut self.anthropic.accounts_dir);
         expand_tilde_opt(&mut self.anthropic.desktop_profiles_dir);
         expand_tilde_opt(&mut self.openai.codex_auth_path);
+        expand_tilde_opt(&mut self.openai.accounts_dir);
+        for account in &mut self.openai.accounts {
+            account.codex_home = expand_tilde(&account.codex_home);
+        }
         expand_tilde_opt(&mut self.cursor.db_path);
         expand_tilde_opt(&mut self.cursor.agent_auth_path);
         expand_tilde_opt(&mut self.kiro.db_path);
@@ -1097,6 +1197,22 @@ impl Config {
             if !labels.insert(&account.label) {
                 return Err(AppError::Credentials(format!(
                     "duplicate anthropic account label {:?}",
+                    account.label
+                )));
+            }
+        }
+        let mut openai_labels = HashSet::new();
+        for account in &self.openai.accounts {
+            validate_account_label_for("openai", &account.label)?;
+            if !openai_labels.insert(&account.label) {
+                return Err(AppError::Credentials(format!(
+                    "duplicate openai account label {:?}",
+                    account.label
+                )));
+            }
+            if account.codex_home.as_os_str().is_empty() {
+                return Err(AppError::Credentials(format!(
+                    "openai account {:?} must set a non-empty codex_home",
                     account.label
                 )));
             }
@@ -2467,6 +2583,113 @@ credentials_path = "~/w/.credentials.json"
         assert_eq!(
             default_account_credentials_path(cfg, "work"),
             Path::new("/home/u/.config/ai-usagebar/accounts/work/.credentials.json"),
+        );
+    }
+
+    #[test]
+    fn codex_accounts_parse_validate_and_expand_paths() {
+        let file = write_toml(
+            r#"
+[openai]
+codex_auth_path = "~/default/auth.json"
+accounts_dir = "~/codex-accounts"
+show_default_account = false
+[[openai.accounts]]
+label = "client"
+codex_home = "~/client"
+"#,
+        );
+        let config = Config::load_from(file.path()).unwrap();
+        let home = crate::cache::home_dir().unwrap();
+        assert_eq!(
+            config.openai.accounts_dir,
+            Some(home.join("codex-accounts"))
+        );
+        assert_eq!(
+            config.openai.accounts[0].auth_path(),
+            home.join("client/auth.json")
+        );
+        assert!(!config.openai.show_default_account);
+        for bad in [
+            "",
+            "..",
+            "a/b",
+            "a\\b",
+            "a:b",
+            "usage.json",
+            ".fetch.lock",
+            "a\n",
+        ] {
+            assert!(validate_account_label_for("openai", bad).is_err());
+        }
+        for body in [
+            "[[openai.accounts]]\nlabel='x'\ncodex_home='/one'\n[[openai.accounts]]\nlabel='x'\ncodex_home='/two'",
+            "[[openai.accounts]]\nlabel='../bad'\ncodex_home='/one'",
+            "[[openai.accounts]]\nlabel='x'\ncodex_home=''",
+            "[[openai.accounts]]\nlabel='x'",
+        ] {
+            let file = write_toml(body);
+            assert!(Config::load_from(file.path()).is_err());
+        }
+    }
+
+    #[test]
+    fn codex_discovery_merges_sorted_auth_files_with_explicit_accounts() {
+        let root = tempfile::tempdir().unwrap();
+        for label in ["zeta", "alpha", "empty", "usage.json", "bad:label"] {
+            let dir = root.path().join(label);
+            std::fs::create_dir(&dir).unwrap();
+            if label != "empty" {
+                std::fs::write(dir.join("auth.json"), "{}").unwrap();
+            }
+        }
+        std::fs::write(root.path().join("stray"), "{}").unwrap();
+        let config = OpenAiConfig {
+            accounts_dir: Some(root.path().to_path_buf()),
+            accounts: vec![OpenAiAccount {
+                label: "zeta".into(),
+                codex_home: root.path().join("explicit"),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            config
+                .all_accounts()
+                .iter()
+                .map(|a| a.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["zeta", "alpha"]
+        );
+        assert_eq!(
+            config.account("zeta").unwrap().codex_home,
+            root.path().join("explicit")
+        );
+        assert_eq!(
+            config.account("alpha").unwrap().auth_path(),
+            root.path().join("alpha/auth.json")
+        );
+        let error = config.account("missing").unwrap_err().to_string();
+        assert!(
+            error.contains("zeta") && error.contains("alpha") && error.contains("known labels")
+        );
+        let absent = OpenAiConfig {
+            accounts_dir: Some(root.path().join("missing")),
+            ..Default::default()
+        };
+        assert!(absent.all_accounts().is_empty());
+    }
+
+    #[test]
+    fn old_codex_config_keeps_default_path_and_visibility() {
+        let file =
+            write_toml("[openai]\ncodex_auth_path='/chosen/auth.json'\nadmin_key_env='UNUSED'");
+        let config = Config::load_from(file.path()).unwrap();
+        assert!(config.openai.accounts.is_empty());
+        assert!(config.openai.accounts_dir.is_none());
+        assert!(config.openai.show_default_account);
+        assert_eq!(
+            config.openai.auth_path(None).unwrap(),
+            Path::new("/chosen/auth.json")
         );
     }
 }

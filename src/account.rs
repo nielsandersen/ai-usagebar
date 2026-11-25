@@ -1,4 +1,4 @@
-//! Administrative commands for named Claude accounts.
+//! Administrative commands for named Claude and Codex accounts.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal, Write};
@@ -16,7 +16,7 @@ struct Registered {
     account_dir: PathBuf,
     credential_display: String,
     already_existed: bool,
-    anthropic_enabled: bool,
+    vendor_enabled: bool,
 }
 
 impl Registered {
@@ -35,11 +35,14 @@ pub fn run(action: &AccountAction) -> i32 {
         AccountAction::Add {
             label,
             no_login,
+            codex,
             desktop,
             email,
             yes,
         } => {
-            if *desktop {
+            if *codex {
+                add_codex(label, !no_login)
+            } else if *desktop {
                 add_desktop(label, email.as_deref(), *yes)
             } else {
                 add(label, !no_login)
@@ -221,6 +224,7 @@ fn status(json: bool) -> i32 {
         "desktop": desktop,
         "cli": cli,
         "usage_accounts": usage_accounts,
+        "codex": codex_status(&config.openai),
     });
     if json {
         println!("{report}");
@@ -228,6 +232,22 @@ fn status(json: bool) -> i32 {
     }
     print_status(&report);
     0
+}
+
+/// Status checks file presence only; it never opens Codex credentials.
+fn codex_status(config: &crate::config::OpenAiConfig) -> serde_json::Value {
+    let accounts: Vec<_> = config
+        .all_accounts()
+        .into_iter()
+        .map(|account| {
+            serde_json::json!({
+                "label": account.label,
+                "codex_home": account.codex_home,
+                "has_credentials": account.auth_path().is_file(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "accounts": accounts })
 }
 
 fn print_status(report: &serde_json::Value) {
@@ -284,6 +304,21 @@ fn print_status(report: &serde_json::Value) {
         println!(
             "  note: the live CLI login belongs to no account listed here, so its \
              saved copies may be stale."
+        );
+    }
+    println!("\nCodex            named CODEX_HOME logins");
+    let accounts = report["codex"]["accounts"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    if accounts.is_empty() {
+        println!("  no named accounts; add one with `ai-usagebar account add <label> --codex`");
+    }
+    for account in accounts {
+        println!(
+            "  {:<12} creds={:<4} {}",
+            account["label"].as_str().unwrap_or("?"),
+            yes_no(&account["has_credentials"]),
+            account["codex_home"].as_str().unwrap_or("?")
         );
     }
 }
@@ -805,6 +840,129 @@ fn ask(prompt: &str) -> Option<String> {
     (!answer.is_empty()).then_some(answer)
 }
 
+fn add_codex(label: &str, login: bool) -> i32 {
+    let registration = (|| {
+        let config_path = crate::config::resolved_path()
+            .or_else(crate::config::default_path)
+            .ok_or_else(|| AppError::Other("could not resolve a config.toml path".into()))?;
+        let home = crate::cache::home_dir().ok();
+        register_codex_at(&config_path, label, home.as_deref())
+    })();
+    let registration = match registration {
+        Ok(registration) => registration,
+        Err(error) => {
+            eprintln!("ai-usagebar account: could not add {label:?}: {error}");
+            return 1;
+        }
+    };
+    println!(
+        "Codex account {label:?} is configured in {}.",
+        registration.config_path.display()
+    );
+    if !registration.vendor_enabled {
+        println!("Note: [openai] enabled = false; enable it to show this account.");
+    }
+    if !login {
+        println!("Sign in later with `ai-usagebar account add {label} --codex`.");
+        return 0;
+    }
+    let mut command = codex_login_command(&registration.account_dir);
+    match command.status() {
+        Ok(status) if status.success() => {
+            let _ = restamp_config(&registration.config_path);
+            0
+        }
+        Ok(status) => {
+            eprintln!(
+                "Codex login failed ({}); retry with `ai-usagebar account add {label} --codex`.",
+                status.code().unwrap_or(-1)
+            );
+            1
+        }
+        Err(error) => {
+            eprintln!(
+                "Could not launch codex login: {error}. Retry with `ai-usagebar account add {label} --codex`."
+            );
+            1
+        }
+    }
+}
+
+fn codex_login_command(account_dir: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("codex");
+    command.arg("login").env("CODEX_HOME", account_dir);
+    for var in crate::vendor::vendor_secret_env_vars_to_remove(&[]) {
+        command.env_remove(var);
+    }
+    command
+}
+
+fn register_codex_at(config_path: &Path, label: &str, home: Option<&Path>) -> Result<Registered> {
+    crate::config::validate_account_label_for("openai", label)?;
+    let original = match std::fs::read_to_string(config_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(AppError::io_at(config_path, error)),
+    };
+    let mut doc: toml_edit::DocumentMut =
+        original.parse().map_err(|error: toml_edit::TomlError| {
+            AppError::Other(format!("config.toml is not valid TOML: {error}"))
+        })?;
+    let config = Config::load_from(config_path)?;
+    let existing = config
+        .openai
+        .all_accounts()
+        .into_iter()
+        .find(|account| account.label == label);
+    let already_existed = existing.is_some();
+    let account_dir = existing.map_or_else(
+        || {
+            home.map_or_else(
+                || {
+                    config_path
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .to_path_buf()
+                },
+                |home| home.join(".config").join("ai-usagebar"),
+            )
+            .join("accounts")
+            .join("codex")
+            .join(label)
+        },
+        |account| account.codex_home,
+    );
+    let credential_display = home.map_or_else(
+        || account_dir.display().to_string(),
+        |home| crate::config::tildify(&account_dir, home),
+    );
+    if !already_existed {
+        crate::config::add_account_to_doc(
+            &mut doc,
+            "openai",
+            label,
+            "codex_home",
+            &credential_display,
+        )?;
+    }
+    let directory_was_missing = !account_dir.exists();
+    std::fs::create_dir_all(&account_dir).map_err(|error| AppError::io_at(&account_dir, error))?;
+    if !already_existed || directory_was_missing {
+        restrict_account_dir(&account_dir)?;
+    }
+    if !already_existed {
+        crate::cache::atomic_write(config_path, doc.to_string().as_bytes())?;
+    }
+    Ok(Registered {
+        config_path: config_path.to_path_buf(),
+        credential_file: account_dir.join("auth.json"),
+        account_dir,
+        credential_display,
+        already_existed,
+        vendor_enabled: config.openai.enabled,
+    })
+}
+
 fn add(label: &str, login: bool) -> i32 {
     let registration = match register(label) {
         Ok(registration) => registration,
@@ -826,7 +984,7 @@ fn add(label: &str, login: bool) -> i32 {
         );
         println!("  credentials_path = {}", registration.credential_display);
     }
-    if !registration.anthropic_enabled {
+    if !registration.vendor_enabled {
         println!("  note: [anthropic] is disabled; set enabled = true for this account to appear.");
     }
     println!();
@@ -958,7 +1116,7 @@ fn register_at(config_path: &Path, label: &str, home: Option<&Path>) -> Result<R
 
     // Honor an existing explicit or accounts_dir-discovered account. In
     // particular, do not send a re-login to a different default directory.
-    let (existing, anthropic_enabled) = if config_path.exists() {
+    let (existing, vendor_enabled) = if config_path.exists() {
         let config = Config::load_from(config_path)?;
         let existing = config
             .anthropic
@@ -1007,7 +1165,7 @@ fn register_at(config_path: &Path, label: &str, home: Option<&Path>) -> Result<R
         account_dir,
         credential_display,
         already_existed,
-        anthropic_enabled,
+        vendor_enabled,
     })
 }
 
@@ -1130,7 +1288,7 @@ mod tests {
         std::fs::write(&config_path, "[anthropic]\nenabled = false\n").unwrap();
 
         let registration = register_at(&config_path, "work", None).unwrap();
-        assert!(!registration.anthropic_enabled);
+        assert!(!registration.vendor_enabled);
         let written = std::fs::read_to_string(config_path).unwrap();
         assert!(written.contains("enabled = false"));
     }
@@ -1156,5 +1314,102 @@ mod tests {
             std::fs::read_to_string(path).unwrap(),
             "# edited while login ran\n"
         );
+    }
+
+    #[test]
+    fn codex_registration_preserves_comments_paths_and_status_shape() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let original = "# keep this comment\n[openai]\nenabled = false # keep this too\n";
+        std::fs::write(&path, original).unwrap();
+        let registration = register_codex_at(&path, "client", None).unwrap();
+        assert_eq!(
+            registration.account_dir,
+            root.path().join("accounts/codex/client")
+        );
+        assert!(!registration.vendor_enabled);
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.starts_with(original));
+        let again = register_codex_at(&path, "client", None).unwrap();
+        assert!(again.already_existed);
+        assert_eq!(again.account_dir, registration.account_dir);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
+        let config = Config::load_from(&path).unwrap();
+        let status = codex_status(&config.openai);
+        assert_eq!(status["accounts"][0]["label"], "client");
+        assert_eq!(status["accounts"][0]["has_credentials"], false);
+        std::fs::write(
+            registration.credential_file,
+            "invented content, never parsed by status",
+        )
+        .unwrap();
+        assert_eq!(
+            codex_status(&config.openai)["accounts"][0]["has_credentials"],
+            true
+        );
+        assert!(register_codex_at(&path, "../escape", None).is_err());
+    }
+
+    #[test]
+    fn codex_registration_reuses_discovered_home_and_rejects_invalid_config() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("discovered/client");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("auth.json"), "{}").unwrap();
+        let path = root.path().join("config.toml");
+        let body = format!(
+            "[openai]\naccounts_dir = {:?}\n",
+            root.path().join("discovered")
+        );
+        std::fs::write(&path, &body).unwrap();
+        let registration = register_codex_at(&path, "client", None).unwrap();
+        assert_eq!(registration.account_dir, dir);
+        assert!(registration.already_existed);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+        std::fs::write(&path, "[broken").unwrap();
+        assert!(register_codex_at(&path, "new", None).is_err());
+        assert!(!root.path().join("accounts").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_login_uses_only_the_registered_home_and_inherits_stdio() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let registration = register_codex_at(&path, "client", None).unwrap();
+        assert_eq!(
+            std::fs::metadata(&registration.account_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        let bin = root.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let script = bin.join("codex");
+        std::fs::write(&script, r#"#!/bin/sh
+[ "$#" = 1 ] && [ "$1" = login ] || exit 9
+umask 077
+printf '%s' '{"tokens":{"access_token":"invented","refresh_token":"invented-refresh","id_token":"invented-id","account_id":"test-account"}}' > "$CODEX_HOME/auth.json"
+"#).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut command = codex_login_command(&registration.account_dir);
+        command.env("PATH", &bin).env("HOME", root.path());
+        assert!(command.status().unwrap().success());
+        assert_eq!(
+            crate::openai::creds::read_from(&registration.credential_file)
+                .unwrap()
+                .tokens
+                .account_id
+                .as_deref(),
+            Some("test-account")
+        );
+        let again = register_codex_at(&path, "client", None).unwrap();
+        let mut command = codex_login_command(&again.account_dir);
+        command.env("PATH", &bin);
+        assert!(command.status().unwrap().success());
+        assert!(!root.path().join(".codex").exists());
     }
 }
