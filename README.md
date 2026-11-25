@@ -41,6 +41,7 @@ codebase.
 
 - [Configuration](docs/configuration.md)
 - [Claude accounts](docs/claude-accounts.md)
+- [Codex accounts](docs/codex-accounts.md)
 - [Format placeholders](docs/format-placeholders.md)
 - [Provider endpoints and live tests](docs/vendor-endpoints.md)
 - [KDE Plasma 6 plasmoid](kde-plasmoid/README.md)
