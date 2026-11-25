@@ -1509,6 +1509,36 @@ func openRouterAccountLabels() -> [String] {
     return accountLabels(inTOML: text, vendor: "openrouter")
 }
 
+/// Codex discovery requires an auth.json file, matching the Rust account scan.
+func discoverCodexAccountLabels(inDir dir: String) -> [String] {
+    discoverAccountLabels(inDir: dir).filter { label in
+        let reserved = ["usage.json", ".stale", ".last_error", ".fetch.lock"]
+        guard !label.isEmpty, label != ".", label != "..",
+              !label.contains(":"), !label.contains("\\"),
+              !label.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              !reserved.contains(label) else { return false }
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: "\(dir)/\(label)/auth.json", isDirectory: &isDir)
+            && !isDir.boolValue
+    }
+}
+
+func codexAccountLabels(inTOML text: String) -> [String] {
+    let explicit = accountLabels(inTOML: text, vendor: "openai")
+    var discovered: [String] = []
+    if let dir = tomlValueInText(text, section: "openai", key: "accounts_dir"), !dir.isEmpty {
+        discovered = discoverCodexAccountLabels(inDir: NSString(string: dir).expandingTildeInPath)
+    }
+    return mergedAccountLabels(explicit: explicit, discovered: discovered)
+}
+
+func codexAccountLabels() -> [String] {
+    guard let text = try? String(contentsOfFile: configPathTOML(), encoding: .utf8) else {
+        return []
+    }
+    return codexAccountLabels(inTOML: text)
+}
+
 /// Rust semantics (`show_default_account`): `false` hides an unnamed entry,
 /// but is ignored when there are no named accounts, so a vendor never loses
 /// its only entry.
@@ -1519,6 +1549,7 @@ func showDefaultAccount(configValue: String?, hasAccounts: Bool) -> Bool {
 
 /// Pseudo-id mapping: `<vendor>@<label>` selects a named account.
 let CLAUDE_ACCOUNT_ID_PREFIX = "anthropic@"
+let CODEX_ACCOUNT_ID_PREFIX = "openai@"
 let OPENROUTER_ACCOUNT_ID_PREFIX = "openrouter@"
 // A Claude account whose usage comes from the Desktop app's own token (a saved
 // ~/.claude-acc/profiles/<label>), fetched with the widget's `--desktop` flag.
@@ -1572,6 +1603,13 @@ func openRouterAccountMenuEntries(_ labels: [String]) -> [MenuEntry] {
     }
 }
 
+func codexAccountMenuEntries(_ labels: [String]) -> [MenuEntry] {
+    labels.map {
+        let id = CODEX_ACCOUNT_ID_PREFIX + $0
+        return MenuEntry(id: id, name: entryDisplayName(id))
+    }
+}
+
 /// Apply `[ui] overview_vendors` with the same semantics as the TUI: preserve
 /// config order, omit unavailable vendors, and include every named account
 /// when its base vendor is requested.
@@ -1609,6 +1647,15 @@ func vendorEntries(active: String, usageAccounts: [UsageAccount]? = nil) -> [Men
                 out.append(MenuEntry(id: v.id, name: v.name))
             }
             out.append(contentsOf: claudeAccountMenuEntries(accounts))
+        } else if v.id == "openai" {
+            let labels = codexAccountLabels()
+            let showDefault = showDefaultAccount(
+                configValue: configValueTOML("openai", "show_default_account"),
+                hasAccounts: !labels.isEmpty)
+            if showDefault && (v.id == active || vendorConfigured(v)) {
+                out.append(MenuEntry(id: v.id, name: v.name))
+            }
+            out.append(contentsOf: codexAccountMenuEntries(labels))
         } else if v.id == "openrouter" {
             let labels = openRouterAccountLabels()
             let showDefault = showDefaultAccount(
@@ -2090,6 +2137,10 @@ struct SettingsView: View {
         let labels = claudeAccountLabels()
         if let at = ids.firstIndex(of: "anthropic") {
             ids.insert(contentsOf: labels.map { CLAUDE_ACCOUNT_ID_PREFIX + $0 }, at: at + 1)
+        }
+        let codexLabels = codexAccountLabels()
+        if let at = ids.firstIndex(of: "openai") {
+            ids.insert(contentsOf: codexLabels.map { CODEX_ACCOUNT_ID_PREFIX + $0 }, at: at + 1)
         }
         let openRouterLabels = openRouterAccountLabels()
         if let at = ids.firstIndex(of: "openrouter") {
@@ -3138,6 +3189,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if vendor.id == "anthropic" {
                 let hasAccounts = lastAccountStatus?.usageAccounts.map { !$0.isEmpty } ?? !claudeAccountLabels().isEmpty
                 return showDefaultAccount(configValue: configValueTOML(vendor.id, "show_default_account"), hasAccounts: hasAccounts)
+            }
+            if vendor.id == "openai" {
+                return showDefaultAccount(configValue: configValueTOML(vendor.id, "show_default_account"), hasAccounts: !codexAccountLabels().isEmpty)
             }
             if vendor.id == "openrouter" {
                 return showDefaultAccount(configValue: configValueTOML(vendor.id, "show_default_account"), hasAccounts: !openRouterAccountLabels().isEmpty)

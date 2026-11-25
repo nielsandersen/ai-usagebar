@@ -457,6 +457,39 @@ func testClaudeAccounts() {
     assertEqual(discoverAccountLabels(inDir: dir + "/missing").isEmpty, true,
                 "missing dir → empty")
 
+    // Codex uses auth.json and skips empty directories and reserved labels.
+    for sub in ["zeta", "alpha", "usage.json", "bad:label"] {
+        try? fm.createDirectory(atPath: "\(dir)/\(sub)", withIntermediateDirectories: true)
+        fm.createFile(atPath: "\(dir)/\(sub)/auth.json", contents: Data("{}".utf8))
+    }
+    try? fm.createDirectory(atPath: "\(dir)/nofile/auth.json", withIntermediateDirectories: true)
+    assertEqual(discoverCodexAccountLabels(inDir: dir), ["alpha", "zeta"],
+                "Codex requires auth files and safe labels")
+    let codexTOML = """
+    [openai]
+    accounts_dir = '\(dir)'
+    [[openai.accounts]]
+    label = "zeta"
+    codex_home = "~/elsewhere"
+    [[openai.accounts]]
+    label = 'client'
+    codex_home = "~/client"
+    [[anthropic.accounts]]
+    label = "unrelated"
+    """
+    assertEqual(codexAccountLabels(inTOML: codexTOML), ["zeta", "client", "alpha"],
+                "Codex merges explicit labels first and drops discovery clashes")
+    assertEqual(codexAccountLabels(inTOML: "[openai]"), [], "old config has no named Codex accounts")
+    assertEqual(discoverCodexAccountLabels(inDir: dir + "/missing"), [], "missing Codex directory is ignored")
+    assertEqual(vendorArgs(for: "openai@client"), ["--vendor", "openai", "--account", "client"],
+                "Codex fetch uses the selected account")
+    assertEqual(baseVendorId("openai@client"), "openai", "Codex account base vendor")
+    let codexEntries = codexAccountMenuEntries(["client", "personal"])
+    assertEqual(codexEntries.map { $0.id }, ["openai@client", "openai@personal"], "Codex menu entries")
+    assertEqual(codexEntries[0].name, "Codex \u{00B7} client", "Codex keeps existing account naming")
+    assertEqual(filterOverviewEntries(codexEntries, requested: ["openai"]).map { $0.id },
+                ["openai@client", "openai@personal"], "overview includes all Codex accounts")
+
     // Pseudo-id mapping round-trip.
     assertEqual(accountLabel(of: "anthropic@gmail") ?? "?", "gmail", "label extracted")
     assertEqual(accountLabel(of: "anthropic") == nil, true, "base id has no label")
@@ -580,6 +613,11 @@ func testAccountStatus() {
                  UsageAccount(label: "gmail", desktop: true)],
                 "usage accounts preserve Rust source selection")
     assertEqual(accountsSummaryLine(s!), "Desktop: toptal   ·   Code: struct", "summary line")
+
+    var withCodex = try! JSONSerialization.jsonObject(with: Data(full.utf8)) as! [String: Any]
+    withCodex["codex"] = ["accounts": [["label": "client", "codex_home": "/invented/client", "has_credentials": true]]]
+    let extendedStatus = parseAccountStatus(try! JSONSerialization.data(withJSONObject: withCodex))
+    assertEqual(extendedStatus, s, "additive Codex status preserves Claude parsing")
 
     // No Claude Desktop app: the whole half is null, the CLI half still shows.
     let linux = parseAccountStatus(Data("""
