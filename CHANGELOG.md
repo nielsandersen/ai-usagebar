@@ -9,6 +9,14 @@ Each release is also published at
 
 ## [Unreleased]
 
+## [1.4.1-niels.12] — 2026-11-27
+
+### Added
+- Keep the menu bar down to one account in Overview while the menu still shows
+  every account in full. Choose "One account" under "Menu bar shows" in
+  Settings, then click an account in the menu to put it in the menu bar.
+  "Every account" works as before.
+
 ## [1.4.1-niels.11] — 2026-11-25
 
 ### Added
@@ -1718,7 +1726,7 @@ vendors. Highlights:
 - Live API smoke test suite (`make smoke`) that exercises the real
   undocumented endpoints to detect schema drift before users do.
 
-[Unreleased]: https://github.com/nielsandersen/ai-usagebar/compare/macos-v1.4.1-niels.11...codex/macos-personal
+[Unreleased]: https://github.com/nielsandersen/ai-usagebar/compare/macos-v1.4.1-niels.12...codex/macos-personal
 [1.4.1-niels.6]: https://github.com/nielsandersen/ai-usagebar/compare/macos-v1.4.1-niels.5...macos-v1.4.1-niels.6
 [1.4.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.0...v1.3.1
@@ -1775,4 +1783,5 @@ vendors. Highlights:
 
 [1.4.1-niels.5]: https://github.com/nielsandersen/ai-usagebar/releases/tag/macos-v1.4.1-niels.5
 
+[1.4.1-niels.12]: https://github.com/nielsandersen/ai-usagebar/releases/tag/macos-v1.4.1-niels.12
 [1.4.1-niels.11]: https://github.com/nielsandersen/ai-usagebar/releases/tag/macos-v1.4.1-niels.11

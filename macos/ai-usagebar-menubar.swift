@@ -41,6 +41,7 @@ let SETTINGS_DEFAULTS: [String: Any] = [
     "barStyle": "block",
     "menuBarMode": "compact",
     "menuBarGlyph": "dot",
+    "overviewBarScope": "all",
     "colorLow": "#98c379",
     "colorMid": "#e5c07b",
     "colorHigh": "#d19a66",
@@ -2117,6 +2118,7 @@ struct SettingsView: View {
     @AppStorage("barStyle") private var barStyle = "block"
     @AppStorage("menuBarMode") private var menuBarMode = "compact"
     @AppStorage("menuBarGlyph") private var menuBarGlyph = "dot"
+    @AppStorage("overviewBarScope") private var overviewBarScope = "all"
     @AppStorage("swapShortcutEnabled") private var swapShortcutEnabled = true
     @AppStorage("compactShortcutEnabled") private var compactShortcutEnabled = true
     @AppStorage("colorLow") private var colorLow = "#98c379"
@@ -2216,6 +2218,17 @@ struct SettingsView: View {
                             Picker("Symbols", selection: $menuBarGlyph) {
                                 Text("Dots").tag("dot")
                                 Text("Provider Icons").tag("mark")
+                            }
+                        }
+                        if vendor == "overview" {
+                            Picker("Menu bar shows", selection: $overviewBarScope) {
+                                Text("Every account").tag("all")
+                                Text("One account").tag("one")
+                            }
+                            if overviewBarScope == "one" {
+                                Text("Click an account in the menu to choose which one.")
+                                    .font(.callout).foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                         if menuBarMode == "text" {
@@ -2434,6 +2447,30 @@ func setOverviewProvider(_ id: String, hidden: Bool) {
 /// testable — the render path (which also drops nil snapshots) is not.
 func overviewVisibleIds(_ ids: [String], hidden: Set<String>) -> [String] {
     ids.filter { !hidden.contains($0) }
+}
+
+/// Overview menu-bar scope: "all" shows every account the header toggles
+/// leave in (today's behaviour); "one" shows a single account in the bar and
+/// lists every account in the dropdown. Absent or unknown value → "all".
+func overviewBarScope() -> String {
+    DEF.string(forKey: "overviewBarScope") == "one" ? "one" : "all"
+}
+
+/// The account picked for the bar in the "one" scope; nil when never picked.
+func overviewBarAccount() -> String? {
+    DEF.string(forKey: "overviewBarAccount")
+}
+
+/// The ids the menu-bar face shows, in entry order. Scope "all" is the header
+/// toggle filter. Scope "one" ignores the hidden set and shows the picked
+/// account when it is in `ids` and in `available` (has a snapshot with a
+/// percentage); otherwise the first available id; otherwise nothing.
+/// Pure + testable; callers still drop entries with no snapshot.
+func overviewBarIds(ids: [String], hidden: Set<String>, scope: String,
+                    account: String?, available: Set<String>) -> [String] {
+    guard scope == "one" else { return overviewVisibleIds(ids, hidden: hidden) }
+    if let a = account, ids.contains(a), available.contains(a) { return [a] }
+    return ids.first(where: { available.contains($0) }).map { [$0] } ?? []
 }
 
 /// The next id in the cycle, wrapping. `current` absent from `ids` (e.g. the
@@ -3363,9 +3400,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// numbers move. Providers hidden from the summary are dropped, as are
     /// balance-only ones (no percentage to grade) and any whose fetch came
     /// back empty; the dropdown still lists all of them.
+    /// The ids the menu-bar face includes under the current scope (see
+    /// `overviewBarIds`). Accounts count as available when their snapshot
+    /// carries a percentage, the thing the bar grades.
+    func overviewBarVisibleIds(_ items: [(name: String, id: String, snap: Snapshot?)]) -> [String] {
+        let available = Set(items.filter { $0.snap != nil && $0.snap?.creditBalance == nil }.map { $0.id })
+        return overviewBarIds(ids: items.map { $0.id }, hidden: overviewHiddenProviders(),
+                              scope: overviewBarScope(), account: overviewBarAccount(),
+                              available: available)
+    }
+
     func overviewCompactEntries(_ items: [(name: String, id: String, snap: Snapshot?)]) -> [StatusEntry] {
-        let visible = Set(overviewVisibleIds(items.map { $0.id },
-                                             hidden: overviewHiddenProviders()))
+        let visible = Set(overviewBarVisibleIds(items))
         return items
             .filter { visible.contains($0.id) && $0.snap?.creditBalance == nil }
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
@@ -3380,9 +3426,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                           _ appearance: NSAppearance) -> NSAttributedString {
         let secondary = menuBarTextColor(appearance, secondary: true)
         // Providers toggled off in the dropdown are dropped from the always-on
-        // top summary (but still listed there so they can be re-enabled).
-        let hidden = overviewHiddenProviders()
-        let visible = Set(overviewVisibleIds(items.map { $0.id }, hidden: hidden))
+        // top summary (but still listed there so they can be re-enabled). In
+        // the "one" scope only the picked account is left.
+        let visible = Set(overviewBarVisibleIds(items))
         let heads: [(name: String, pct: Int, elapsed: Int?, value: String, reset: String?)] =
             items.compactMap {
                 guard visible.contains($0.id), let s = $0.snap else { return nil }
@@ -3509,7 +3555,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // its windows as indented detail rows. The pool is a flat list of menu
         // items, so "sections" is only a matter of how many slots each provider
         // claims — headers 1, plus one per detail row while it is shown.
-        let hidden = overviewHiddenProviders()
+        // The "one" scope never collapses an account: the hidden set belongs to
+        // the "all" scope and stays stored untouched for when it returns.
+        let oneScope = overviewBarScope() == "one"
+        let hidden = oneScope ? Set<String>() : overviewHiddenProviders()
+        let barId = oneScope ? overviewBarVisibleIds(items).first : nil
         connectionNoticeItem.isHidden = true
         statusItem.button?.toolTip = items.compactMap { item in
             providerNotices[item.id].map { "\(item.name): \($0)" }
@@ -3531,17 +3581,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // summary. Checkmark = shown; unchecked = dimmed header with its
             // detail collapsed, so the toggle declutters both surfaces at once.
             // Jump-to-vendor lives in the "Provider" submenu and ⌥⌘\.
+            // In the "one" scope a click picks this account for the bar instead,
+            // the checkmark marks the one shown, and no header is dimmed.
             let isHidden = hidden.contains(item.id)
             let head = overviewRows[slot]; slot += 1
             head.isHidden = false
             head.indentationLevel = 0
             head.isEnabled = true
-            head.state = isHidden ? .off : .on
+            head.state = oneScope ? (item.id == barId ? .on : .off) : (isHidden ? .off : .on)
             head.representedObject = item.id
             head.target = self
-            head.action = #selector(toggleOverviewProvider(_:))
+            head.action = oneScope ? #selector(pickOverviewBarAccount(_:))
+                : #selector(toggleOverviewProvider(_:))
             let fitted = item.name.count > 28 ? String(item.name.prefix(28)) + "…" : item.name
-            head.toolTip = "\(item.name) — click to \(isHidden ? "show" : "hide") in the menu bar"
+            head.toolTip = oneScope ? "\(item.name): click to show in the menu bar"
+                : "\(item.name) — click to \(isHidden ? "show" : "hide") in the menu bar"
             head.setAccessibilityLabel(item.name)
             head.attributedTitle = run(fitted, isHidden ? .secondaryLabelColor : .labelColor,
                                        menuLabelFont)
@@ -4021,6 +4075,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let id = sender.representedObject as? String else { return }
         overviewVisibilityChangePending = true
         setOverviewProvider(id, hidden: !overviewHiddenProviders().contains(id))
+    }
+
+    /// "One account" scope: make this header's account the one in the menu
+    /// bar. Presentation-only, re-rendered from the last fetch like the toggle.
+    @objc func pickOverviewBarAccount(_ sender: NSMenuItem) {
+        // Writing the stored value again may not notify, which would leave the
+        // pending flag set to swallow the next real settings change.
+        guard let id = sender.representedObject as? String, id != overviewBarAccount() else { return }
+        overviewVisibilityChangePending = true
+        DEF.set(id, forKey: "overviewBarAccount")
     }
 
     func setError(_ msg: String) {

@@ -567,6 +567,34 @@ func testOverviewProviderToggle() {
     assertEqual(overviewVisibleIds(ids, hidden: ["gone"]), ids, "a stale hidden id matches nothing")
 }
 
+func testOverviewBarScope() {
+    let ids = ["anthropic", "anthropic@amass", "openai", "openai@amass"]
+    let all = Set(ids)
+    let hidden: Set<String> = ["anthropic@amass", "openai"]
+    assertEqual(overviewBarIds(ids: ids, hidden: hidden, scope: "all", account: "openai", available: all),
+                overviewVisibleIds(ids, hidden: hidden), "scope all equals the header-toggle filter")
+    assertEqual(overviewBarIds(ids: ids, hidden: [], scope: "all", account: nil, available: []),
+                ids, "scope all does not depend on availability")
+    assertEqual(overviewBarIds(ids: ids, hidden: [], scope: "one", account: "openai@amass", available: all),
+                ["openai@amass"], "scope one shows the picked account")
+    assertEqual(overviewBarIds(ids: ids, hidden: [], scope: "one", account: nil, available: all),
+                ["anthropic"], "unset account falls back to the first available")
+    assertEqual(overviewBarIds(ids: ids, hidden: [], scope: "one", account: nil,
+                               available: ["openai", "openai@amass"]),
+                ["openai"], "fallback skips entries without a snapshot")
+    assertEqual(overviewBarIds(ids: ids, hidden: [], scope: "one", account: "gone", available: all),
+                ["anthropic"], "a stale account id falls back")
+    assertEqual(overviewBarIds(ids: ids, hidden: [], scope: "one", account: "openai",
+                               available: ["anthropic"]),
+                ["anthropic"], "a picked account with no snapshot falls back")
+    assertEqual(overviewBarIds(ids: ids, hidden: [], scope: "one", account: "openai", available: []),
+                [], "nothing available gives an empty list")
+    assertEqual(overviewBarIds(ids: ids, hidden: Set(ids), scope: "one", account: "openai", available: all),
+                ["openai"], "the hidden set is ignored in scope one")
+    assertEqual(overviewBarIds(ids: ids, hidden: ["anthropic"], scope: "one", account: nil, available: all),
+                ["anthropic"], "a hidden first entry is still the fallback in scope one")
+}
+
 func testSystemIntegrations() {
     print("launch agent + hot-key status")
     do {
@@ -847,6 +875,7 @@ struct TestRunner {
         testCompactToggle()
         testShortReset()
         testOverviewProviderToggle()
+        testOverviewBarScope()
         testAccountStatus()
         testSystemIntegrations()
         if failures > 0 {
