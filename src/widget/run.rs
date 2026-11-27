@@ -777,17 +777,23 @@ async fn anthropic_output(cli: &Cli, config: &Config) -> Result<WaybarOutput> {
     let client = http_client()?;
     let (creds_target, cache) = anthropic_target(cli, config)?;
     let endpoints = anthropic::fetch::Endpoints::default();
-    let outcome =
-        match anthropic::fetch_snapshot(&client, &creds_target, &cache, &endpoints, DEFAULT_TTL)
-            .await
-        {
-            Ok(o) => o,
-            Err(e) if e.is_transient() => {
-                // Mirror claudebar's `loading_network` path.
-                return Ok(WaybarOutput::loading(cli.icon.as_deref()));
-            }
-            Err(e) => return Err(e),
-        };
+    let outcome = match anthropic::fetch::fetch_account_snapshot(
+        &client,
+        &creds_target,
+        &cache,
+        &endpoints,
+        DEFAULT_TTL,
+        cli.account.as_deref(),
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(e) if e.is_transient() => {
+            // Mirror claudebar's `loading_network` path.
+            return Ok(WaybarOutput::loading(cli.icon.as_deref()));
+        }
+        Err(e) => return Err(e),
+    };
 
     let theme = theme_from_cli(cli);
 

@@ -975,8 +975,42 @@ struct ConnectionSummary {
     let healthy: Bool
 }
 
+/// A named account that is declared in config but has no login on this Mac.
+/// Logins live in each Mac's Keychain and are not copied between machines, so
+/// the same config can be signed in on one MacBook and not on the other.
+struct MissingLogin: Equatable {
+    let label: String
+    let codex: Bool
+}
+
+/// Read the backend's own "not signed in" error (src/anthropic/fetch.rs and
+/// src/openai/fetch.rs), never the entry's label: only the backend knows that
+/// no credential file and no Keychain item exist for the account.
+func missingLogin(_ output: [String: Any]?, vendor: String) -> MissingLogin? {
+    guard let output, !isDesktopAccountId(vendor) else { return nil }
+    let kind: String
+    switch baseVendorId(vendor) {
+    case "anthropic": kind = "Claude"
+    case "openai": kind = "Codex"
+    default: return nil
+    }
+    let detail = stripMarkup(output["tooltip"] as? String ?? "")
+    let pattern = "\\b\(kind) account \"[^\"]*\" is not signed in; run `ai-usagebar account add ([^`\\s]+)( --codex)?`"
+    guard let regex = try? NSRegularExpression(pattern: pattern),
+          let match = regex.firstMatch(in: detail, range: NSRange(detail.startIndex..., in: detail)),
+          let label = Range(match.range(at: 1), in: detail).map({ String(detail[$0]) }) else { return nil }
+    let codex = match.range(at: 2).location != NSNotFound
+    guard codex == (kind == "Codex") else { return nil }
+    return MissingLogin(label: label, codex: codex)
+}
+
+func missingLoginNotice(_ missing: MissingLogin) -> String {
+    "Not signed in on this Mac. Run: ai-usagebar account add \(missing.label)\(missing.codex ? " --codex" : "")"
+}
+
 func connectionState(_ output: [String: Any]?, vendor: String, hasSnapshot: Bool) -> ConnectionState {
     guard let output else { return .unavailable }
+    if missingLogin(output, vendor: vendor) != nil { return .signInRequired }
     let text = stripMarkup(output["text"] as? String ?? "")
     let detail = stripMarkup(output["tooltip"] as? String ?? "").lowercased()
     let stale = text.contains("⏸")
@@ -1041,6 +1075,7 @@ func connectionSummary(_ connections: [ConnectionHealth], now: Date, maxAge: Tim
 func providerNotice(_ output: [String: Any], vendor: String) -> String? {
     let text = stripMarkup(output["text"] as? String ?? "")
     guard text.contains("⏸") || text.contains("⚠") || text.contains("Loading") else { return nil }
+    if let missing = missingLogin(output, vendor: vendor) { return missingLoginNotice(missing) }
     switch connectionState(output, vendor: vendor, hasSnapshot: true) {
     case .healthy: return nil
     case .keychainLocked: return "Unlock your login keychain, then retry."
@@ -1809,10 +1844,11 @@ func conflictPreview(_ conflicts: [DeletionConflict], limit: Int = 10) -> String
 /// in, and a CLI one runs `claude` — so it goes to Terminal rather than being
 /// swallowed by a background subprocess. Single-quoted with `'` doubled out,
 /// so a label with a quote in it can't break out of the command.
-func addAccountScript(binary: String, label: String, desktop: Bool) -> String {
+func addAccountScript(binary: String, label: String, desktop: Bool, codex: Bool = false) -> String {
     func quote(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+    let flag = desktop ? " --desktop" : (codex ? " --codex" : "")
     return "#!/usr/bin/env bash\n"
-        + "\(quote(binary)) account add \(quote(label))\(desktop ? " --desktop" : "")\n"
+        + "\(quote(binary)) account add \(quote(label))\(flag)\n"
         + "echo; read -n 1 -s -r -p 'Press any key to close…'\n"
 }
 
@@ -2541,6 +2577,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var monitoredConnections: [MenuEntry]?
     var connectionHealth: [String: ConnectionHealth] = [:]
     var providerNotices: [String: String] = [:]
+    var missingLogins: [String: MissingLogin] = [:]
     var rows: [String: NSMenuItem] = [:]
     // Overview mode fills these (one per vendor/account); hidden in
     // single-vendor mode. The pool starts at the built-in vendor count and can
@@ -3247,6 +3284,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let ids = Set(entries.map { $0.id })
         connectionHealth = connectionHealth.filter { ids.contains($0.key) }
         providerNotices = providerNotices.filter { ids.contains($0.key) }
+        missingLogins = missingLogins.filter { ids.contains($0.key) }
         #if WIDGET_HOST
         publishWidgetSnapshot()
         #endif
@@ -3284,6 +3322,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let health = ConnectionHealth(id: entry.id, name: entry.name, state: state, checkedAt: Date())
                 let notice = object.flatMap { providerNotice($0, vendor: entry.id) }
                     ?? (snap == nil ? "Couldn't load usage. Try Refresh Now." : nil)
+                let missing = missingLogin(object, vendor: entry.id)
                 DispatchQueue.main.async {
                     guard let me = self, me.refreshGeneration == generation else { return }
                     me.connectionHealth[entry.id] = health
@@ -3291,6 +3330,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     me.updateWidgetUsage(entry: entry, snapshot: snap, health: health)
                     #endif
                     me.providerNotices[entry.id] = notice
+                    me.missingLogins[entry.id] = missing
                     me.renderConnectionHealth()
                     if entry.id == selectedVendor, selectedVendor == VENDOR {
                         if let snap {
@@ -3566,6 +3606,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }.joined(separator: "\n")
         let details = items.map { item -> [OverviewDetail] in
             guard !hidden.contains(item.id) else { return [] }
+            if item.snap == nil, let missing = missingLogins[item.id] {
+                return [OverviewDetail(label: missingLoginNotice(missing), pct: nil, notice: true)]
+            }
             return item.snap == nil && providerNotices[item.id] != nil ? [] : overviewDetails(item.snap)
         }
         ensureOverviewRowCapacity(items.count + details.reduce(0) { $0 + $1.count })
@@ -3615,6 +3658,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 it.setAccessibilityLabel([d.label, d.value, d.reset.map { "Resets in \($0)" } ?? ""].filter { !$0.isEmpty }.joined(separator: ", "))
                 it.attributedTitle = d.notice ? run(d.label, .secondaryLabelColor, menuLabelFont)
                     : overviewDetailTitle(d, colW, appearance)
+                if d.notice, item.snap == nil, missingLogins[item.id] != nil {
+                    offerSignIn(it, id: item.id)
+                }
             }
         }
         for i in slot..<overviewRows.count { overviewRows[i].isHidden = true }
@@ -3653,6 +3699,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         providerNotices[VENDOR] = providerNotice(obj, vendor: VENDOR)
+        missingLogins[VENDOR] = missingLogin(obj, vendor: VENDOR)
         guard let snap = parse(text, vendor: baseVendorId(VENDOR)) else {
             setError(providerNotices[VENDOR] ?? "Couldn't load usage. Check provider setup in Settings.")
             return
@@ -4105,6 +4152,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for it in overviewRows { it.isHidden = true }
         compactItem.isHidden = true
         accountsInfoItem.isHidden = true
+        // An account with no login here: the header names the account and the
+        // notice sits under it as a row that starts the sign-in.
+        if let missing = missingLogins[VENDOR] {
+            headerItem.attributedTitle = run(entryDisplayName(VENDOR), .labelColor,
+                                             NSFont.boldSystemFont(ofSize: 13))
+            connectionNoticeItem.attributedTitle = run(missingLoginNotice(missing), .secondaryLabelColor,
+                                                       menuLabelFont)
+            offerSignIn(connectionNoticeItem, id: VENDOR)
+            connectionNoticeItem.isHidden = false
+        }
+    }
+
+    /// Turn a "not signed in on this Mac" notice into the sign-in itself: one
+    /// click runs `ai-usagebar account add <label>` in Terminal, where the login
+    /// can ask its questions.
+    func offerSignIn(_ item: NSMenuItem, id: String) {
+        item.isEnabled = true
+        item.target = self
+        item.action = #selector(signInMissingAccount(_:))
+        item.representedObject = id
+        item.toolTip = "Click to sign in from Terminal"
+    }
+
+    @objc func signInMissingAccount(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              let missing = missingLogins[id],
+              let bin = resolveBinary("ai-usagebar") else { return }
+        runInTerminal(addAccountScript(binary: bin, label: missing.label, desktop: false,
+                                       codex: missing.codex))
     }
 }
 

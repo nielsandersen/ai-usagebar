@@ -69,6 +69,36 @@ pub async fn fetch_snapshot(
     .await
 }
 
+/// Named accounts use the same flow, but a missing login reads as an
+/// instruction rather than a file error. Only the account's own file being
+/// absent qualifies: [`creds::resolve`] surfaces that error only when the
+/// account's dir-scoped Keychain item is also absent or dead, and a locked
+/// Keychain keeps its own error. Rejected or expired tokens are unchanged.
+pub async fn fetch_account_snapshot(
+    client: &reqwest::Client,
+    creds_target: &creds::CredsTarget,
+    cache: &Cache,
+    endpoints: &Endpoints,
+    cache_ttl: Duration,
+    label: Option<&str>,
+) -> Result<FetchOutcome> {
+    fetch_snapshot(client, creds_target, cache, endpoints, cache_ttl)
+        .await
+        .map_err(|error| not_signed_in(error, creds_target, label))
+}
+
+fn not_signed_in(error: AppError, target: &creds::CredsTarget, label: Option<&str>) -> AppError {
+    if let (Some(label), creds::CredsTarget::Named { path, .. }) = (label, target)
+        && matches!(&error, AppError::Io { path: missing, source }
+            if missing == path && source.kind() == std::io::ErrorKind::NotFound)
+    {
+        return AppError::Credentials(format!(
+            "Claude account {label:?} is not signed in; run `ai-usagebar account add {label}`"
+        ));
+    }
+    error
+}
+
 async fn fetch_snapshot_with_resolver(
     client: &reqwest::Client,
     creds_target: &creds::CredsTarget,
@@ -735,6 +765,75 @@ mod tests {
         assert!(outcome.last_error.is_none());
         assert!(cache.read_last_error().is_none());
         refresh.assert_async().await;
+    }
+
+    // A declared account with no login on this machine: no file and no
+    // usable Keychain item, so `resolve` hands back the file's own error.
+    fn named_target(dir: &TempDir) -> creds::CredsTarget {
+        creds::CredsTarget::Named {
+            path: dir.path().join(".credentials.json"),
+            config_dir: dir.path().to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn missing_named_login_says_which_account_and_the_command() {
+        let dir = TempDir::new().unwrap();
+        let target = named_target(&dir);
+        let missing = creds::read_from(target.path()).unwrap_err();
+        let error = not_signed_in(missing, &target, Some("amass")).to_string();
+        assert_eq!(
+            error,
+            "credentials error: Claude account \"amass\" is not signed in; \
+             run `ai-usagebar account add amass`"
+        );
+    }
+
+    #[test]
+    fn other_credential_failures_keep_their_message() {
+        let dir = TempDir::new().unwrap();
+        let target = named_target(&dir);
+        // A present but broken file is not "never signed in".
+        std::fs::write(target.path(), "not json").unwrap();
+        let broken = creds::read_from(target.path()).unwrap_err();
+        let error = not_signed_in(broken, &target, Some("amass")).to_string();
+        assert!(error.contains("could not parse"), "{error}");
+        // A rejected or expired token keeps its existing wording.
+        for rejected in [
+            AppError::Http {
+                status: 401,
+                body: "invalid token".into(),
+            },
+            AppError::Credentials("token refresh failed; run `claude` to re-auth".into()),
+        ] {
+            let before = rejected.to_string();
+            assert_eq!(
+                not_signed_in(rejected, &target, Some("amass")).to_string(),
+                before
+            );
+        }
+    }
+
+    #[test]
+    fn missing_file_outside_a_named_account_stays_an_io_error() {
+        let dir = TempDir::new().unwrap();
+        let named = named_target(&dir);
+        let explicit = creds::CredsTarget::Explicit(named.path().to_path_buf());
+        let missing = || creds::read_from(named.path()).unwrap_err();
+        assert!(matches!(
+            not_signed_in(missing(), &explicit, Some("amass")),
+            AppError::Io { .. }
+        ));
+        assert!(matches!(
+            not_signed_in(missing(), &named, None),
+            AppError::Io { .. }
+        ));
+        // A missing cache file under the same label is not a missing login.
+        let elsewhere = creds::read_from(&dir.path().join("usage.json")).unwrap_err();
+        assert!(matches!(
+            not_signed_in(elsewhere, &named, Some("amass")),
+            AppError::Io { .. }
+        ));
     }
 
     #[tokio::test]

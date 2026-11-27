@@ -773,6 +773,52 @@ func testProviderNotices() {
                 nil, "healthy provider clears notice")
 }
 
+func testMissingLogins() {
+    // The backend's own wording, exactly as the widget prints it.
+    let claude: [String: Any] = ["text": "⚠", "class": "critical", "tooltip":
+        "Credentials error.\nClaude account \"amass\" is not signed in; run `ai-usagebar account add amass`"]
+    let codex: [String: Any] = ["text": "⚠", "class": "critical", "tooltip":
+        "Credentials error.\nCodex account \"amass\" is not signed in; run `ai-usagebar account add amass --codex`"]
+    let claudeId = CLAUDE_ACCOUNT_ID_PREFIX + "amass"
+    let codexId = CODEX_ACCOUNT_ID_PREFIX + "amass"
+    assertEqual(missingLogin(claude, vendor: claudeId), MissingLogin(label: "amass", codex: false),
+                "Claude account without a login here is detected")
+    assertEqual(missingLogin(codex, vendor: codexId), MissingLogin(label: "amass", codex: true),
+                "Codex account without a login here is detected")
+    assertEqual(providerNotice(claude, vendor: claudeId),
+                "Not signed in on this Mac. Run: ai-usagebar account add amass",
+                "Claude notice gives the one command")
+    assertEqual(providerNotice(codex, vendor: codexId),
+                "Not signed in on this Mac. Run: ai-usagebar account add amass --codex",
+                "Codex notice gives the one command with --codex")
+    assertEqual(connectionState(claude, vendor: claudeId, hasSnapshot: false), .signInRequired,
+                "missing Claude login is a sign-in, not a connectivity failure")
+    assertEqual(connectionState(codex, vendor: codexId, hasSnapshot: false), .signInRequired,
+                "missing Codex login is a sign-in, not a connectivity failure")
+    let health = ConnectionHealth(id: claudeId, name: entryDisplayName(claudeId), state: .signInRequired, checkedAt: Date())
+    assertEqual(connectionSummary([health], now: Date(), maxAge: 90).title,
+                "\(entryDisplayName(claudeId)) needs sign-in", "health summary names the account")
+    // The state comes from the output, so the wrong vendor's wording, a
+    // Desktop account, or an expired token never reads as "not signed in here".
+    assertNil(missingLogin(codex, vendor: claudeId), "Codex wording does not match a Claude entry")
+    assertNil(missingLogin(claude, vendor: codexId), "Claude wording does not match a Codex entry")
+    assertNil(missingLogin(claude, vendor: DESKTOP_ACCOUNT_ID_PREFIX + "amass"), "Desktop accounts are excluded")
+    let expired: [String: Any] = ["text": "⚠", "tooltip": "Credentials error.\ntoken refresh failed; run `claude` to re-auth"]
+    assertNil(missingLogin(expired, vendor: claudeId), "expired token is not a missing login")
+    assertEqual(providerNotice(expired, vendor: claudeId), "Sign in again in Claude Code.",
+                "expired token keeps its existing notice")
+    let rawFileError: [String: Any] = ["text": "⚠", "tooltip":
+        "I/O error at /Users/x/.config/ai-usagebar/accounts/amass/.credentials.json.\nNo such file or directory (os error 2)"]
+    assertNil(missingLogin(rawFileError, vendor: claudeId), "old raw file error is not guessed into the new notice")
+    assertNil(missingLogin(nil, vendor: claudeId), "no output, no notice")
+
+    // One click runs the matching sign-in.
+    assertEqual(addAccountScript(binary: "/b", label: "amass", desktop: false, codex: true)
+                    .contains("'/b' account add 'amass' --codex\n"), true, "Codex sign-in script passes --codex")
+    assertEqual(addAccountScript(binary: "/b", label: "amass", desktop: false)
+                    .contains("'/b' account add 'amass'\n"), true, "Claude sign-in script has no flag")
+}
+
 func testStatusAccessibility() {
     assertEqual(statusAccessibilityValue([]), "Usage unavailable", "empty icon readout has text alternative")
     assertEqual(statusAccessibilityValue([StatusEntry(pct: 42, text: "42", vendorId: "openai")]),
@@ -864,6 +910,7 @@ struct TestRunner {
         testConnectionHealth()
         testStatusAccessibility()
         testProviderNotices()
+        testMissingLogins()
         testRingArc()
         testTomlParsing()
         testDefaultEnabled()

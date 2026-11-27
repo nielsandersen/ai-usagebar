@@ -17,6 +17,14 @@ Each release is also published at
   Settings, then click an account in the menu to put it in the menu bar.
   "Every account" works as before.
 
+### Changed
+- An account that is set up but has no login on this Mac now says so under its
+  name: "Not signed in on this Mac. Run: ai-usagebar account add amass" (with
+  `--codex` for a Codex account). Click the line to start the sign-in in
+  Terminal. Logins stay in each Mac's Keychain and are not copied between
+  machines, so the same account list can be signed in on one Mac and not on
+  another. A Claude account used to show a raw file error here instead.
+
 ## [1.4.1-niels.11] — 2026-11-25
 
 ### Added
